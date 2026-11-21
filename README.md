@@ -1,113 +1,125 @@
-# LlamaIndex Workflow Example
+# Carthij Agentic Workflow
 
-This is a [LlamaIndex](https://www.llamaindex.ai/) project that using [Workflows](https://docs.llamaindex.ai/en/stable/understanding/workflows/) deployed with [LlamaDeploy](https://github.com/run-llama/llama_deploy).
+A lightweight, modern multi-agent orchestration harness powered by the Google Gemini API (`google-genai` SDK) and FastAPI.
 
-LlamaDeploy is a system for deploying and managing LlamaIndex workflows, while LlamaIndexServer provides a pre-built TypeScript server with an integrated chat UI that can connect directly to LlamaDeploy deployments. This example shows how you can quickly set up a complete chat application by combining these two technologies/
+## Architecture
 
-## Prerequisites
+```
+[ User Form ] ──(POST / Webhook)──▶ [ FastAPI Service ]
+                                             │
+                                             ▼
+                                  [ Coordinator Agent ]
+                            (Gemini 2.5 Flash: Planner)
+                                             │
+                       ┌─────────────────────┼─────────────────────┐
+                       ▼                     ▼                     ▼
+               [ Subagent A ]          [ Subagent B ]        [ Subagent C ]
+             (e.g., Researcher)       (e.g., Validator)     (e.g., Analyst)
+                       │                     │                     │
+                       └─────────────────────┼─────────────────────┘
+                                             ▼
+                                   (asyncio.gather / parallel)
+                                             ▼
+                                  [ Synthesis & Output ]
+                               (Coordinator finalizes result)
+                                             │
+                                             ▼
+                            [ Webhook Response / DB Save / PubSub ]
+```
 
-If you haven't installed uv, you can follow the instructions [here](https://docs.astral.sh/uv/getting-started/installation/) to install it.
+## Features
 
-You can configure [LLM model](https://docs.llamaindex.ai/en/stable/module_guides/models/llms) and [embedding model](https://docs.llamaindex.ai/en/stable/module_guides/models/embeddings) in [src/settings.py](src/settings.py).
+- **Direct Gemini Integration**: Uses the official `google-genai` SDK with native tool/function calling and structured JSON outputs (`response_schema`).
+- **Parallel Subagent Execution**: The Coordinator breaks down incoming requests and fans out subtasks simultaneously using Python's `asyncio.gather()`.
+- **Hybrid Packaging**: Managed via `uv` and `pyproject.toml`, with an auto-generated, clean `requirements.txt` for standard `pip` and Docker/Cloud Run builds.
+- **Webhook & API Ready**: Built-in FastAPI endpoints for form ingestion with synchronous and asynchronous (background task) modes.
 
-Please setup their API keys in the `src/.env` file.
+## Getting Started
 
-## Installation
+### 1. Environment Setup
 
-Both the SDK and the CLI are part of the LlamaDeploy Python package. To install, just run:
+Copy `.env.example` to `.env`:
 
 ```bash
+cp .env.example .env
+```
+
+Set your Gemini API key (or Vertex AI credentials):
+
+```env
+GEMINI_API_KEY=your_api_key_here
+```
+
+### 2. Virtual Environment & Installation
+
+#### Option A: Using `uv` (Recommended)
+
+`uv` automatically creates and manages a virtual environment in `.venv/`:
+
+```bash
+# Create/sync virtual environment and install dependencies
 uv sync
+
+# (Optional) Activate the virtual environment
+source .venv/bin/activate
 ```
 
-If you don't have uv installed, you can follow the instructions [here](https://docs.astral.sh/uv/getting-started/installation/).
+> **Note**: When using `uv run <command>`, `uv` automatically executes within `.venv` without needing manual activation.
 
-## Generate Index
+#### Option B: Standard Python `venv` + `pip`
 
-Generate the embeddings of the documents in the `./data` directory:
-
-```shell
-uv run generate
-```
-
-## Running the Deployment
-
-At this point we have all we need to run this deployment. Ideally, we would have the API server already running
-somewhere in the cloud, but to get started let's start an instance locally. Run the following python script
-from a shell:
-
-```
-$ uv run -m llama_deploy.apiserver
-INFO:     Started server process [10842]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:4501 (Press CTRL+C to quit)
-```
-
-From another shell, use the CLI, `llamactl`, to create the deployment:
-
-```
-$ uv run llamactl deploy llama_deploy.yml
-Deployment successful: chat
-```
-
-## UI Interface
-
-LlamaDeploy will serve the UI through the apiserver. Point the browser to [http://localhost:4501/deployments/chat/ui](http://localhost:4501/deployments/chat/ui) to interact with your deployment through a user-friendly interface.
-
-## API endpoints
-
-You can find all the endpoints in the [API documentation](http://localhost:4501/docs). To get started, you can try the following endpoints:
-
-Create a new task:
+If you are not using `uv`, create and activate a standard virtual environment:
 
 ```bash
-curl -X POST 'http://localhost:4501/deployments/chat/tasks/create' \
-  -H 'Content-Type: application/json' \
+# 1. Create a virtual environment
+python3 -m venv .venv
+
+# 2. Activate the virtual environment
+source .venv/bin/activate
+
+# 3. Upgrade pip and install dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 3. Run the Services
+
+**Backend (FastAPI):**
+```bash
+uv run api
+# or
+uv run uvicorn src.api.app:app --reload --port 8000
+```
+API Documentation: [http://localhost:8000/docs](http://localhost:8000/docs)
+
+**Frontend (Next.js):**
+```bash
+cd ui
+npm run dev
+```
+Open [http://localhost:3000](http://localhost:3000) to view the funding intake application.
+
+### 4. Triggering the Workflow via Webhook
+
+Send a POST request to `/api/v1/webhook/submit`:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/webhook/submit \
+  -H "Content-Type: application/json" \
   -d '{
-    "input": "{\"user_msg\":\"Hello\",\"chat_history\":[]}",
-    "service_id": "workflow"
+    "form_id": "client_intake",
+    "submitter_email": "user@example.com",
+    "data": {
+      "company_name": "Apex Global",
+      "target_market": "European Union",
+      "business_model": "SaaS B2B"
+    },
+    "context": "Evaluate market readiness and regulatory compliance."
   }'
 ```
 
-Stream events:
+### Running Tests
 
 ```bash
-curl 'http://localhost:4501/deployments/chat/tasks/0b411be6-005d-43f0-9b6b-6a0017f08002/events?session_id=dd36442c-45ca-4eaa-8d75-b4e6dad1a83e&raw_event=true' \
-  -H 'Content-Type: application/json'
+uv run python -m unittest discover -s tests
 ```
-
-Note that the task_id and session_id are returned when creating a new task.
-
-## Use Case
-
-We have prepared an [example workflow](./app/workflow.py) for the deep research use case, where you can ask questions about the example documents in the [./data](./data) directory.
-To update the workflow, you can modify the code in [`src/workflow.py`](src/workflow.py).
-
-## Customize the UI
-
-The UI is served by LLamaIndexServer package, you can configure the UI by modifying the `uiConfig` in the [ui/index.ts](ui/index.ts) file.
-
-The following are the available options:
-
-- `starterQuestions`: Predefined questions for chat interface
-- `componentsDir`: Directory for custom event components
-- `layoutDir`: Directory for custom layout components
-- `llamaDeploy`: The LlamaDeploy configration (deployment name and workflow name that defined in the [llama_deploy.yml](llama_deploy.yml) file)
-
-## LlamaCloud Integration
-
-You can enable LlamaCloud integration by setting the `llamaCloud` option in the [ui/index.ts](ui/index.ts) file.
-
-The following are the available options:
-
-- `outputDir`: The directory for LlamaCloud output
-
-## Learn More
-
-- [LlamaIndex Documentation](https://docs.llamaindex.ai) - learn about LlamaIndex.
-- [Workflows Introduction](https://docs.llamaindex.ai/en/stable/understanding/workflows/) - learn about LlamaIndex workflows.
-- [LlamaDeploy GitHub Repository](https://github.com/run-llama/llama_deploy)
-- [Chat-UI Documentation](https://ts.llamaindex.ai/docs/chat-ui)
-
-You can check out [the LlamaIndex GitHub repository](https://github.com/run-llama/llama_index) - your feedback and contributions are welcome!

@@ -1,5 +1,37 @@
-__pycache__
-storage
-.env
-output
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Persisted runtime data & storage
+storage/
+output/
 .ui/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Node / Frontend
+node_modules/
+ui/node_modules/
+.next/
+ui/.next/
+out/
+ui/out/
+ui/next-env.d.ts
+ui/tsconfig.tsbuildinfo
+
+# Testing & Linting
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS specific
+.DS_Store
+Thumbs.db
