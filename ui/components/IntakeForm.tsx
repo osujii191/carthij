@@ -63,8 +63,12 @@ export default function IntakeForm() {
       if (profile.target_funding_instrument) setFundingType(profile.target_funding_instrument);
       if (profile.target_amount_usd) setFundingAmount(profile.target_amount_usd);
       if (profile.use_of_funds) setUseOfFunds(profile.use_of_funds);
-      if (profile.verified_extra_facts && typeof profile.verified_extra_facts === "object") {
-        setExtractedFacts(profile.verified_extra_facts);
+      if (Array.isArray(profile.verified_extra_facts)) {
+        const mapped: Record<string, string> = {};
+        for (const item of profile.verified_extra_facts) {
+          if (item?.key && item?.value) mapped[item.key] = String(item.value);
+        }
+        setExtractedFacts(mapped);
       }
       setPdfNotice(
         profile.source_summary || `Auto-filled intake from ${file.name} via Gemini 3.8 Flash.`

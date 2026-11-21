@@ -1,5 +1,5 @@
 import base64
-from typing import Dict, Literal
+from typing import List, Literal
 from google.genai import types
 from pydantic import BaseModel, Field
 
@@ -16,6 +16,11 @@ FUNDING_INSTRUMENTS = (
     "Impact Loan / Revenue-Based Financing",
     "Corporate Sponsorship / Partnership",
 )
+
+
+class ExtractedFactItem(BaseModel):
+    key: str = Field(..., description="Short snake_case fact key (e.g. annual_revenue, headcount, federal_ein).")
+    value: str = Field(..., description="Verified fact value explicitly stated in the PDF.")
 
 
 class ExtractedIntakeProfile(BaseModel):
@@ -47,8 +52,8 @@ class ExtractedIntakeProfile(BaseModel):
         default="",
         description="Concise summary of planned use of funds / R&D / capital priorities from the document.",
     )
-    verified_extra_facts: Dict[str, str] = Field(
-        default_factory=dict,
+    verified_extra_facts: List[ExtractedFactItem] = Field(
+        default_factory=list,
         description=(
             "Additional factual attributes explicitly stated in the PDF (e.g., annual_revenue, headcount, "
             "federal_ein, sam_uei, founded_year). NEVER invent values not in the document."
