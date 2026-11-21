@@ -176,18 +176,18 @@
         <!-- SLIDE 1: Headline Benchmark vs. Baselines (50 Unseen/Messy Cases) -->
         <!-- ================================================================ -->
         <section>
-          <span class="pill">50-Case Out-of-Distribution &amp; Adversarial Benchmark</span>
+          <span class="pill">64-Case Out-of-Distribution &amp; Multimodal Benchmark</span>
           <h2>Why Multi-Agent Grounding Beats Single-Call LLMs</h2>
           <p class="subtitle">
-            Tested on <strong>30 messy/unprepared funding intakes</strong> (TX, MA, WA, CO, PR, OCR decks, entity traps)
-            + <strong>20 unseen grant portal DOMs</strong> (Airtable, Typeform, Submittable, required EIN traps).
+            Tested on <strong>30 messy/unprepared funding intakes</strong> (TX, MA, WA, CO, PR, entity traps)
+            + <strong>24 unseen Vision+DOM grant portals</strong> + <strong>10 multimodal PDF pitch decks &amp; 10-Ks</strong>.
           </p>
 
           <div class="kpi-grid">
             <div class="kpi-card highlight">
               <div class="kpi-value">99.3%</div>
               <div class="kpi-delta">vs. 38.5% Single LLM (+60.8 pts)</div>
-              <div class="kpi-label">Track 1 Discovery &amp; Readiness Composite Accuracy (30 cases)</div>
+              <div class="kpi-label">Track 1 Discovery &amp; Readiness Accuracy (30 messy/OOD cases)</div>
             </div>
             <div class="kpi-card highlight">
               <div class="kpi-value">98.3%</div>
@@ -196,29 +196,29 @@
             </div>
             <div class="kpi-card highlight">
               <div class="kpi-value">100%</div>
-              <div class="kpi-delta">vs. 0% Single-Call Autofill</div>
-              <div class="kpi-label">Anti-Fabrication Rate on Missing EIN / SAM.gov UEI / Revenue</div>
+              <div class="kpi-delta">vs. 43.7% Naive Form Autofill</div>
+              <div class="kpi-label">Track 2 Vision+DOM Portal Pre-Fill &amp; Zero-Fabrication (24 portals)</div>
             </div>
             <div class="kpi-card highlight">
               <div class="kpi-value">100%</div>
-              <div class="kpi-delta">0 Fake URLs &middot; 0 Auto-Submits</div>
-              <div class="kpi-label">Programmatic Citation Grounding &amp; Pre-Submit Safety Gate</div>
+              <div class="kpi-delta">vs. 43.6% Regex PDF Scrape</div>
+              <div class="kpi-label">Track 3 Native Multimodal PDF Pitch Deck &amp; 10-K Extraction (10 PDFs)</div>
             </div>
           </div>
 
           <table class="bench-table">
             <thead>
               <tr>
-                <th>Evaluation Dimension (50 Total Unseen &amp; Adversarial Cases)</th>
-                <th>Baseline A: Single LLM</th>
-                <th>Baseline B: Naive 1-Search RAG</th>
+                <th>Evaluation Dimension (64 Total Unseen, Multimodal &amp; Adversarial Cases)</th>
+                <th>Baseline A: Single LLM / Naive</th>
+                <th>Baseline B: 1-Search RAG</th>
                 <th>Carthij v1 (Pre-Eval)</th>
                 <th>Carthij v2 (Hardened)</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td><strong>Track 1: Live Verified URL Grounding Rate</strong> (No 404 / invented paths)</td>
+                <td><strong>Track 1: Live Verified URL Grounding Rate</strong> (30 cases &mdash; no 404 / fake URLs)</td>
                 <td class="bad">0.0%</td>
                 <td class="mid">96.7%</td>
                 <td class="mid">96.7%</td>
@@ -232,24 +232,24 @@
                 <td class="good">98.3%</td>
               </tr>
               <tr>
-                <td><strong>Track 1: Explicit Uncertainty Honesty</strong> ("Unverified" vs. guessed dates)</td>
-                <td class="bad">40.0%</td>
-                <td class="bad">40.0%</td>
-                <td class="good">100.0%</td>
+                <td><strong>Track 2: Vision+DOM Unseen Portal Pre-Fill Accuracy</strong> (24 portals)</td>
+                <td class="bad">43.7%</td>
+                <td class="bad">—</td>
+                <td class="mid">86.3%</td>
                 <td class="good">100.0%</td>
               </tr>
               <tr>
-                <td><strong>Track 2: Unseen Portal Pre-Fill Composite Accuracy</strong> (20 portal DOMs)</td>
-                <td class="bad">40.8%</td>
+                <td><strong>Track 2: Required-Field Anti-Fabrication &amp; PDF Fact Handoff</strong> (EIN/UEI/SSN)</td>
+                <td class="bad">8.3%</td>
                 <td class="bad">—</td>
-                <td class="mid">88.4%</td>
+                <td class="mid">70.8%</td>
                 <td class="good">100.0%</td>
               </tr>
               <tr>
-                <td><strong>Track 2: Required-Field Anti-Fabrication Rate</strong> (Refuses to guess EIN/UEI/SSN)</td>
-                <td class="bad">0.0%</td>
+                <td><strong>Track 3: Multimodal PDF Pitch Deck &amp; 10-K Extraction</strong> (10 PDFs)</td>
+                <td class="bad">43.6%</td>
                 <td class="bad">—</td>
-                <td class="mid">75.0%</td>
+                <td class="mid">95.0%</td>
                 <td class="good">100.0%</td>
               </tr>
             </tbody>

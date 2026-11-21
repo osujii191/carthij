@@ -17,6 +17,75 @@ FUNDING_INSTRUMENTS = (
     "Corporate Sponsorship / Partnership",
 )
 
+_UNVERIFIED_FACT_TOKENS = {
+    "",
+    "tbd",
+    "n/a",
+    "na",
+    "none",
+    "unknown",
+    "applied for",
+    "pending",
+    "00-0000000",
+    "xx-xxxxxxx",
+    "12-3456789 (estimated)",
+}
+
+
+def normalize_extracted_profile(profile: "ExtractedIntakeProfile") -> "ExtractedIntakeProfile":
+    """
+    Programmatic post-normalization for ExtractedIntakeProfile:
+    1. Clamps `mission_and_pitch` to <= 900 chars at word boundary.
+    2. Normalizes `target_funding_instrument` to one of the 6 canonical UI <select> options.
+    3. Strips placeholder/unverified values ('TBD', 'Applied For', fake emails) from
+       `contact_email` and `verified_extra_facts`.
+    """
+    pitch = (profile.mission_and_pitch or "").strip()
+    if len(pitch) > 900:
+        clipped = pitch[:897]
+        last_space = clipped.rfind(" ")
+        pitch = (clipped[:last_space] if last_space > 600 else clipped).rstrip() + "..."
+
+    inst = (profile.target_funding_instrument or "").strip()
+    if inst not in FUNDING_INSTRUMENTS:
+        lower_inst = inst.lower()
+        if "philanthrop" in lower_inst or "foundation" in lower_inst or "501" in lower_inst:
+            inst = "Philanthropic / Foundation Grant"
+        elif "seed" in lower_inst and ("series a" in lower_inst or "venture" in lower_inst):
+            inst = "Equity Investment (Seed / Series A)"
+        elif "safe" in lower_inst or "pre-seed" in lower_inst or "angel" in lower_inst or "equity" in lower_inst:
+            inst = "Equity Investment (Pre-Seed / SAFE / Angel)"
+        elif "loan" in lower_inst or "revenue" in lower_inst or "debt" in lower_inst:
+            inst = "Impact Loan / Revenue-Based Financing"
+        elif "sponsor" in lower_inst or "corporate" in lower_inst:
+            inst = "Corporate Sponsorship / Partnership"
+        else:
+            inst = "Government Grant (SBIR / STTR / Horizon)"
+
+    email = (profile.contact_email or "").strip()
+    if "@" not in email or email.lower() in _UNVERIFIED_FACT_TOKENS or email.lower().endswith("@example.com"):
+        email = ""
+
+    clean_facts: List[ExtractedFactItem] = []
+    seen_keys: set[str] = set()
+    for item in profile.verified_extra_facts:
+        k = (item.key or "").strip().lower().replace(" ", "_").replace("-", "_")
+        v = (item.value or "").strip()
+        if not k or not v or v.lower() in _UNVERIFIED_FACT_TOKENS:
+            continue
+        if k not in seen_keys:
+            seen_keys.add(k)
+            clean_facts.append(ExtractedFactItem(key=k, value=v))
+
+    return profile.model_copy(
+        update={
+            "mission_and_pitch": pitch,
+            "target_funding_instrument": inst,
+            "contact_email": email,
+            "verified_extra_facts": clean_facts,
+        }
+    )
+
 
 class ExtractedFactItem(BaseModel):
     key: str = Field(..., description="Short snake_case fact key (e.g. annual_revenue, headcount, federal_ein).")
@@ -117,4 +186,5 @@ class PDFIntakeExtractor:
             "and any verified factual attributes explicitly stated in the document."
         )
         raw_json = await self.agent.run(prompt, extra_parts=[pdf_part])
-        return ExtractedIntakeProfile.model_validate_json(raw_json)
+        parsed = ExtractedIntakeProfile.model_validate_json(raw_json)
+        return normalize_extracted_profile(parsed)

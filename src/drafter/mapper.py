@@ -43,13 +43,28 @@ def build_applicant_fact_ledger(
     """
     Constructs the strict verified-facts ledger for the applicant.
     Only facts explicitly present here may be filled into compliance/factual fields.
+    Automatically flattens any `verified_extra_facts` list extracted from an uploaded PDF
+    so PDF-sourced compliance facts (e.g. federal_ein, sam_uei) flow directly into pre-fill.
     """
+    flattened_intake = dict(report.intake_data or {})
+    extra_facts = flattened_intake.get("verified_extra_facts")
+    if isinstance(extra_facts, list):
+        for item in extra_facts:
+            if isinstance(item, dict) and item.get("key") and item.get("value"):
+                flattened_intake.setdefault(str(item["key"]), str(item["value"]))
+            elif hasattr(item, "key") and hasattr(item, "value") and item.key and item.value:
+                flattened_intake.setdefault(str(item.key), str(item.value))
+    elif isinstance(extra_facts, dict):
+        for k, v in extra_facts.items():
+            if k and v:
+                flattened_intake.setdefault(str(k), str(v))
+
     return {
         "organization_name": report.org_name,
         "organization_type": report.org_type,
         "target_state": report.target_state,
         "submitter_email": report.submitter_email,
-        "intake_data": report.intake_data,
+        "intake_data": flattened_intake,
         "user_supplied_facts": user_supplied_facts or {},
     }
 

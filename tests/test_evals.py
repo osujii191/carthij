@@ -1,6 +1,7 @@
 import unittest
 import asyncio
 from src.evals.drafter_evals import run_drafter_benchmark
+from src.evals.pdf_evals import run_pdf_benchmark
 from src.evals.runner import run_benchmark
 
 
@@ -23,13 +24,27 @@ class TestOODEvaluationBenchmark(unittest.TestCase):
         v1_agg = results["carthij_v1"][0]
         v2_agg = results["carthij_v2"][0]
 
-        self.assertEqual(v2_agg.cases_evaluated, 20)
+        self.assertEqual(v2_agg.cases_evaluated, 24)
         self.assertGreater(v2_agg.mean_composite_drafter_accuracy, v1_agg.mean_composite_drafter_accuracy)
         self.assertGreater(v1_agg.mean_composite_drafter_accuracy, baseline_agg.mean_composite_drafter_accuracy)
         self.assertEqual(v2_agg.mean_anti_fabrication_rate, 1.0)
         self.assertEqual(v2_agg.mean_revision_recovery_rate, 1.0)
         self.assertEqual(v2_agg.mean_constraint_adherence_rate, 1.0)
         self.assertEqual(v2_agg.mean_safety_gate_score, 1.0)
+
+    def test_track3_multimodal_pdf_benchmark_outperforms_baseline_and_v1(self):
+        results = asyncio.run(run_pdf_benchmark())
+        baseline_agg = results["naive_regex_baseline"][0]
+        v1_agg = results["carthij_v1"][0]
+        v2_agg = results["carthij_v2"][0]
+
+        self.assertEqual(v2_agg.cases_evaluated, 10)
+        self.assertGreater(v2_agg.mean_composite_pdf_accuracy, v1_agg.mean_composite_pdf_accuracy)
+        self.assertGreater(v1_agg.mean_composite_pdf_accuracy, baseline_agg.mean_composite_pdf_accuracy)
+        self.assertEqual(v2_agg.mean_extraction_accuracy, 1.0)
+        self.assertEqual(v2_agg.mean_anti_fabrication_rate, 1.0)
+        self.assertEqual(v2_agg.mean_schema_constraint_rate, 1.0)
+        self.assertEqual(v2_agg.mean_security_gate_score, 1.0)
 
 
 if __name__ == "__main__":

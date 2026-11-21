@@ -677,6 +677,7 @@ async def run_benchmark(
 
 if __name__ == "__main__":
     from src.evals.drafter_evals import run_drafter_benchmark
+    from src.evals.pdf_evals import run_pdf_benchmark
 
     dataset_path = Path("evals/datasets/messy_intakes_v1.jsonl")
     out = asyncio.run(run_benchmark(export_dataset_path=dataset_path))
@@ -687,7 +688,14 @@ if __name__ == "__main__":
 
     drafter_path = Path("evals/datasets/unseen_portals_v1.jsonl")
     drafter_out = asyncio.run(run_drafter_benchmark(export_dataset_path=drafter_path))
-    print("\n=== TRACK 2: BROWSER-USE APPLICATION DRAFTER BENCHMARK (20 CASES) ===")
+    print("\n=== TRACK 2: VISION+DOM BROWSER-USE APPLICATION DRAFTER BENCHMARK (24 CASES) ===")
     for sys_name, (agg, _) in drafter_out.items():
+        print(f"\n--- {sys_name} ---")
+        print(agg.model_dump_json(indent=2))
+
+    pdf_path = Path("evals/datasets/pdf_intakes_v1.jsonl")
+    pdf_out = asyncio.run(run_pdf_benchmark(export_dataset_path=pdf_path))
+    print("\n=== TRACK 3: MULTIMODAL PDF INTAKE EXTRACTION BENCHMARK (10 CASES) ===")
+    for sys_name, (agg, _) in pdf_out.items():
         print(f"\n--- {sys_name} ---")
         print(agg.model_dump_json(indent=2))

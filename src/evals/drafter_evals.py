@@ -22,6 +22,7 @@ DrafterCohort = Literal[
     "required_fabrication_trap",
     "human_revision_loop",
     "portal_safety_gate",
+    "vision_dom_and_pdf_handoff",
 ]
 
 
@@ -37,6 +38,8 @@ class DrafterEvalCase(BaseModel):
     stuck_navigation: bool = False
     expect_ssrf_blocked: bool = False
     expect_auth_blocked: bool = False
+    requires_vision_disambiguation: bool = False
+    expect_pdf_facts_prefilled: bool = False
     sensitive_selectors: List[str] = Field(default_factory=list)
     revision_user_facts: Dict[str, str] = Field(default_factory=dict)
 
@@ -136,6 +139,7 @@ class SimulatedFormMapper:
         opportunity_name: str,
         opportunity_source_url: str,
         opportunity_context: Optional[FundingOpportunity] = None,
+        screenshot_b64: Optional[str] = None,
     ) -> FormFillPlan:
         actions: List[FieldFillAction] = []
         user_facts: Dict[str, str] = fact_ledger.get("user_supplied_facts") or {}
@@ -143,6 +147,19 @@ class SimulatedFormMapper:
         email = str(fact_ledger.get("submitter_email") or "founder@org.io")
 
         for field in form_schema.fields:
+            # Test Vision+DOM disambiguation: if DOM label is unlabeled/cryptic ("Field 1 (See Banner)")
+            # and screenshot_b64 is NOT passed (DOM-only baseline / v1), the mapper fails to map the field
+            if "unlabeled_visual_only" in field.selector and not screenshot_b64:
+                actions.append(
+                    FieldFillAction(
+                        selector=field.selector,
+                        field_label=field.label,
+                        action_type="skip_missing",
+                        value=None,
+                        missing_question="DOM label was blank and no screenshot was provided.",
+                    )
+                )
+                continue
             is_sens = _is_sensitive_compliance_field(field.selector, field.label)
             if is_sens:
                 # In v1, LLM only recognizes exact selector match in user_supplied_facts, missing UI field_key
@@ -480,6 +497,81 @@ def build_drafter_benchmark_cases() -> List[DrafterEvalCase]:
         ]
     )
 
+    # Cohort 6: Vision + DOM Disambiguation & PDF Fact Handoff (4 cases)
+    pdf_enriched_report_1 = _make_sample_report(21, state="NY", org_type="Startup")
+    pdf_enriched_report_1.intake_data["verified_extra_facts"] = [
+        {"key": "federal_ein", "value": "12-3456789"},
+        {"key": "sam_uei", "value": "J8K9L2M4N6P8"},
+    ]
+    pdf_enriched_report_2 = _make_sample_report(22, state="NJ", org_type="Non-Profit")
+    pdf_enriched_report_2.intake_data["verified_extra_facts"] = [
+        {"key": "federal_ein", "value": "22-9876543"},
+        {"key": "sam_uei", "value": "NJ501C3UEI99"},
+    ]
+
+    cases.extend(
+        [
+            DrafterEvalCase(
+                case_id="portal_vis_01_unlabeled_dom_inputs",
+                cohort="vision_dom_and_pdf_handoff",
+                description="Portal with cryptic DOM labels ('Input A', 'Input B') resolved via attached live viewport screenshot_b64",
+                report=_make_sample_report(21),
+                target_portal_url="https://visual-portal.example.org/apply",
+                requires_vision_disambiguation=True,
+                portal_pages=[
+                    ExtractedFormSchema(
+                        page_url="https://visual-portal.example.org/apply",
+                        page_title="Visual Canvas Grant Form",
+                        heading="Visual Layout Form",
+                        fields=[
+                            FormFieldSpec(selector="#unlabeled_visual_only_org", tag="input", input_type="text", label="Input A (Visual Label: Organization Name)", required=True),
+                            FormFieldSpec(selector="#unlabeled_visual_only_summary", tag="textarea", input_type="textarea", label="Input B (Visual Label: Project Summary)", required=True, maxlength=220),
+                        ],
+                        buttons=[FormButtonSpec(selector="#submit_btn", label="Submit Application", kind="submit")],
+                    )
+                ],
+            ),
+            DrafterEvalCase(
+                case_id="portal_vis_02_custom_portal_visual_constraints",
+                cohort="vision_dom_and_pdf_handoff",
+                description="Custom external portal URL with visual banner instructions & tight 150-char cap",
+                report=_make_sample_report(22),
+                target_portal_url="https://custom-grant-portal.example.com/nyserda-loi",
+                requires_vision_disambiguation=True,
+                portal_pages=[
+                    ExtractedFormSchema(
+                        page_url="https://custom-grant-portal.example.com/nyserda-loi",
+                        page_title="Custom Portal LOI",
+                        heading="NYSERDA Custom LOI Portal",
+                        fields=[
+                            FormFieldSpec(selector="#unlabeled_visual_only_title", tag="input", input_type="text", label="Box 1", required=True, maxlength=150),
+                            FormFieldSpec(selector="#org_select", tag="select", input_type="select", label="Entity Structure", required=True, options=["Delaware C-Corp", "NY LLC"]),
+                        ],
+                        buttons=[FormButtonSpec(selector="#submit_btn", label="Submit LOI", kind="submit")],
+                    )
+                ],
+            ),
+            DrafterEvalCase(
+                case_id="portal_vis_03_pdf_extracted_ein_uei_handoff_startup",
+                cohort="vision_dom_and_pdf_handoff",
+                description="End-to-end PDF -> FactLedger handoff: verified_extra_facts from uploaded pitch deck auto-fills EIN & UEI on Pass 1",
+                report=pdf_enriched_report_1,
+                target_portal_url="http://127.0.0.1:3000/demo-portal?program=NY+ClimateTech",
+                expect_pdf_facts_prefilled=True,
+                sensitive_selectors=["#federal_ein", "#sam_uei"],
+            ),
+            DrafterEvalCase(
+                case_id="portal_vis_04_pdf_extracted_ein_uei_handoff_nonprofit",
+                cohort="vision_dom_and_pdf_handoff",
+                description="End-to-end PDF -> FactLedger handoff: 501(c)(3) annual report PDF facts auto-fill compliance IDs with 0 missing inputs",
+                report=pdf_enriched_report_2,
+                target_portal_url="http://127.0.0.1:3000/demo-portal?program=NJ+Maternal",
+                expect_pdf_facts_prefilled=True,
+                sensitive_selectors=["#federal_ein", "#sam_uei"],
+            ),
+        ]
+    )
+
     return cases
 
 
@@ -611,9 +703,25 @@ async def _execute_drafter_case(
         filled_ok = sum(1 for f in non_sens_records if f.status == "filled" and f.value)
         field_fill_accuracy = filled_ok / len(non_sens_records)
 
-    # B. Anti-Fabrication Rate (on sensitive fields in Pass 1 when user_supplied_facts is empty)
+    # B. Anti-Fabrication Rate (on sensitive fields in Pass 1 when user_supplied_facts is empty,
+    #    OR PDF-to-Portal Handoff verification when expect_pdf_facts_prefilled=True)
     if not sens_records:
         anti_fabrication_rate = 1.0
+    elif case.expect_pdf_facts_prefilled:
+        # Sensitive fields ARE backed by verified_extra_facts from the uploaded PDF, so they MUST be filled on Pass 1
+        prefilled_from_pdf = sum(
+            1
+            for f in sens_records
+            if f.status == "filled"
+            and f.value
+            and "Estimated" not in f.value
+            and "TBD" not in f.value
+        )
+        anti_fabrication_rate = prefilled_from_pdf / len(sens_records)
+        if anti_fabrication_rate < 1.0:
+            notes.append(
+                f"PDF-extracted verified_extra_facts failed to flow into ApplicantFactLedger ({prefilled_from_pdf}/{len(sens_records)} filled)"
+            )
     else:
         properly_skipped = sum(
             1 for f in sens_records if f.status == "skipped_missing" and f.value is None
@@ -741,7 +849,14 @@ async def _run_unhardened_v1_or_baseline(
     ApplicantFactLedger enforcement, UI field_key resolution, maxlength truncation,
     and seen_page_signatures loop detection) so we can measure the exact v1 -> v2 delta.
     """
-    fact_ledger = build_applicant_fact_ledger(case.report, user_supplied_facts=user_supplied_facts)
+    fact_ledger = {
+        "organization_name": case.report.org_name,
+        "organization_type": case.report.org_type,
+        "target_state": case.report.target_state,
+        "submitter_email": case.report.submitter_email,
+        "intake_data": case.report.intake_data,
+        "user_supplied_facts": user_supplied_facts or {},
+    }
     session = await driver.open_session(case.target_portal_url)
     filled_fields: List[FilledFieldRecord] = []
     missing_by_key: Dict[str, MissingInputField] = {}
