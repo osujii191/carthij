@@ -58,13 +58,18 @@ class BaseAgent:
         self._tools_map[func.__name__] = func
         self._tools_list.append(func)
 
-    def _build_config(self) -> types.GenerateContentConfig:
+    def _build_config(
+        self,
+        *,
+        include_tools: bool = True,
+        include_schema: bool = True,
+    ) -> types.GenerateContentConfig:
         config_kwargs: Dict[str, Any] = {
             "system_instruction": self.system_instruction,
         }
-        if self._tools_list:
+        if include_tools and self._tools_list:
             config_kwargs["tools"] = self._tools_list
-        if self.response_schema:
+        if include_schema and self.response_schema:
             config_kwargs["response_mime_type"] = "application/json"
             config_kwargs["response_schema"] = self.response_schema
 
@@ -73,7 +78,10 @@ class BaseAgent:
     async def run(self, prompt: str) -> str:
         """
         Executes an agent turn with native async function calling loop.
-        Returns the final textual or structured response.
+        When both `tools` and `response_schema` are configured, runs two-phase execution:
+        1. Tool-calling turns with `tools` enabled and `response_schema` disabled (ensuring
+           consistent behavior across Gemini Developer API and Vertex AI).
+        2. Final structured turn with `response_schema` enabled and `tools` disabled.
         """
         # Append user message to history
         self.history.append(
@@ -83,8 +91,13 @@ class BaseAgent:
             )
         )
 
-        config = self._build_config()
+        two_phase = bool(self._tools_list and self.response_schema)
+        config = self._build_config(
+            include_tools=True,
+            include_schema=not two_phase,
+        )
 
+        response = None
         for iteration in range(self.max_tool_iterations):
             response = await self.client.aio.models.generate_content(
                 model=self.model,
@@ -99,7 +112,9 @@ class BaseAgent:
             # Check if model requested function calls
             function_calls = response.function_calls
             if not function_calls:
-                return response.text or ""
+                if not two_phase:
+                    return response.text or ""
+                break
 
             # Execute function calls
             tool_response_parts: List[types.Part] = []
@@ -135,6 +150,30 @@ class BaseAgent:
                     parts=tool_response_parts,
                 )
             )
+        else:
+            logger.warning(f"[{self.name}] Exceeded max tool iterations ({self.max_tool_iterations}).")
 
-        logger.warning(f"[{self.name}] Exceeded max tool iterations ({self.max_tool_iterations}).")
-        return response.text or "Max iterations reached without final response."
+        if two_phase:
+            self.history.append(
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(
+                            text=(
+                                "Now produce your final output strictly matching the required JSON schema "
+                                "based on the provided context and any tool results above."
+                            )
+                        )
+                    ],
+                )
+            )
+            structured_config = self._build_config(include_tools=False, include_schema=True)
+            final_response = await self.client.aio.models.generate_content(
+                model=self.model,
+                contents=self.history,
+                config=structured_config,
+            )
+            self.history.append(final_response.candidates[0].content)
+            return final_response.text or ""
+
+        return (response.text if response else None) or "Max iterations reached without final response."

@@ -1,0 +1,214 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// This security rules file assumes the following data structures:
+//
+// Collection: reports
+// Document ID: {reportId} (string, server-generated report ID)
+// Access Architecture:
+//   - ALL writes (create, update, delete) are performed exclusively by the
+//     trusted FastAPI backend using Firebase Admin SDK / Google Cloud Firestore
+//     client (which bypasses client Security Rules). All client writes are denied.
+//   - Client reads (get, list) are denied for unauthenticated users and for
+//     internal MVP reports where owner_uid is null. When Firebase Auth is
+//     enabled, an authenticated user may only read/query reports whose
+//     owner_uid matches their Firebase Auth UID.
+//   - Contains PII (submitter_email); strictly owner-only read access.
+//
+// Fields (FundingReport):
+//   - report_id: string (required, immutable, 1..128 chars) - canonical report ID
+//   - status: string (required, enum: queued|in_progress|completed|failed)
+//   - owner_uid: string | null (optional/nullable, immutable once set, 1..128 chars) - Firebase Auth UID
+//   - submitter_email: string | null (optional/nullable, PII, valid email <= 320 chars)
+//   - org_name: string (required, 1..200 chars) - applicant organization name
+//   - org_type: string (required, 1..100 chars) - applicant organization type
+//   - target_state: string (required, 1..50 chars) - target US state/jurisdiction
+//   - intake_data: map (required, <= 50 keys) - structured intake payload
+//   - executive_summary: string | null (optional/nullable, <= 20000 chars)
+//   - readiness_score: int | null (optional/nullable, 0..100)
+//   - opportunities: list (required, <= 100 items) - FundingOpportunity entries
+//   - readiness_gaps: list (required, <= 100 items) - ReadinessGap entries
+//   - action_plan: list (required, <= 100 items) - ActionItem entries
+//   - specialist_outputs: list (required, <= 50 items) - specialist summaries
+//   - sources: list (required, <= 200 items) - persisted SourceRecord summaries
+//   - stage_history: list (required, <= 100 items) - StageProgress entries
+//   - metadata: map (required, <= 50 keys) - pipeline metadata
+//   - created_at: number (required, immutable, >= 0) - Unix epoch seconds
+//   - updated_at: number (required, >= created_at) - Unix epoch seconds
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the request comes from an authenticated Firebase Auth user.
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if the authenticated user matches a given userId.
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Check if the authenticated user owns the existing report document.
+    // Explicitly requires owner_uid to be a string so reports with
+    // owner_uid == null (unauthenticated MVP) are never readable by clients.
+    function isReportOwner() {
+      return isAuthenticated() &&
+        resource.data.owner_uid is string &&
+        request.auth.uid == resource.data.owner_uid;
+    }
+
+    // Validate that the document contains only the allowed fields.
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Validate that all required fields exist.
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // Validate string type and length bounds.
+    function validStringLength(val, minLen, maxLen) {
+      return val is string &&
+        val.size() >= minLen &&
+        val.size() <= maxLen;
+    }
+
+    // Validate nullable string with length bounds.
+    function isNullableString(val, minLen, maxLen) {
+      return val == null || validStringLength(val, minLen, maxLen);
+    }
+
+    // Validate email format with RFC-safe max length.
+    function isValidEmail(email) {
+      return email is string &&
+        email.size() <= 320 &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // Validate list type and maximum size bound.
+    function isValidList(val, maxSize) {
+      return val is list && val.size() <= maxSize;
+    }
+
+    // Validate map type and maximum key count.
+    function isValidMapSize(val, maxKeys) {
+      return val is map && val.size() <= maxKeys;
+    }
+
+    // Ensure immutable fields have not been modified on update.
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    // Note: Client writes to /reports are currently denied (backend-only
+    // via Firebase Admin SDK). This validator defines the canonical
+    // FundingReport schema contract for reference and future client-write
+    // hardening (must be called on both create and update if ever enabled).
+
+    function isValidReport(data) {
+      let allowedFields = [
+        'report_id',
+        'status',
+        'owner_uid',
+        'submitter_email',
+        'org_name',
+        'org_type',
+        'target_state',
+        'intake_data',
+        'executive_summary',
+        'readiness_score',
+        'opportunities',
+        'readiness_gaps',
+        'action_plan',
+        'specialist_outputs',
+        'sources',
+        'stage_history',
+        'metadata',
+        'created_at',
+        'updated_at'
+      ];
+      let requiredFields = [
+        'report_id',
+        'status',
+        'org_name',
+        'org_type',
+        'target_state',
+        'intake_data',
+        'opportunities',
+        'readiness_gaps',
+        'action_plan',
+        'specialist_outputs',
+        'sources',
+        'stage_history',
+        'metadata',
+        'created_at',
+        'updated_at'
+      ];
+      let validStatuses = ['queued', 'in_progress', 'completed', 'failed'];
+
+      return hasOnlyAllowedFields(allowedFields) &&
+        hasRequiredFields(requiredFields) &&
+        validStringLength(data.report_id, 1, 128) &&
+        data.status in validStatuses &&
+        (!('owner_uid' in data) || isNullableString(data.owner_uid, 1, 128)) &&
+        (!('submitter_email' in data) || data.submitter_email == null || isValidEmail(data.submitter_email)) &&
+        validStringLength(data.org_name, 1, 200) &&
+        validStringLength(data.org_type, 1, 100) &&
+        validStringLength(data.target_state, 1, 50) &&
+        isValidMapSize(data.intake_data, 50) &&
+        (!('executive_summary' in data) || isNullableString(data.executive_summary, 0, 20000)) &&
+        (!('readiness_score' in data) || data.readiness_score == null ||
+          (data.readiness_score is int && data.readiness_score >= 0 && data.readiness_score <= 100)) &&
+        isValidList(data.opportunities, 100) &&
+        isValidList(data.readiness_gaps, 100) &&
+        isValidList(data.action_plan, 100) &&
+        isValidList(data.specialist_outputs, 50) &&
+        isValidList(data.sources, 200) &&
+        isValidList(data.stage_history, 100) &&
+        isValidMapSize(data.metadata, 50) &&
+        data.created_at is number && data.created_at >= 0 &&
+        data.updated_at is number && data.updated_at >= data.created_at;
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    match /reports/{reportId} {
+      // Auth-ready owner-only reads (covers both get and list):
+      // - Unauthenticated clients cannot read any report.
+      // - Reports with owner_uid == null (unauthenticated MVP) cannot be
+      //   read directly from clients.
+      // - Authenticated users can only get or query (where owner_uid == uid)
+      //   their own reports, protecting submitter_email PII and report data.
+      allow read: if isReportOwner();
+
+      // All writes (create, update, delete) are performed exclusively by the
+      // trusted FastAPI backend via Firebase Admin SDK / GCP Firestore client.
+      allow write: if false;
+    }
+
+    // ===============================================================
+    // Default Deny
+    // ===============================================================
+
+    // Deny all reads and writes to any other collection or subcollection.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

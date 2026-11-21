@@ -1,3 +1,4 @@
+from contextlib import closing
 import json
 import os
 import sqlite3
@@ -36,7 +37,7 @@ class ReportStorage:
         return conn
 
     def _init_db(self):
-        with self._get_connection() as conn:
+        with closing(self._get_connection()) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS reports (
