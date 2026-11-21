@@ -99,27 +99,29 @@ class SQLiteDraftRepository:
         return draft
 
     async def get(self, draft_id: str) -> Optional[ApplicationDraft]:
-        with closing(self._connect()) as conn:
-            row = conn.execute(
-                "SELECT payload FROM application_drafts WHERE draft_id = ?",
-                (draft_id,),
-            ).fetchone()
-            if not row:
-                return None
-            return ApplicationDraft.model_validate_json(row["payload"])
+        async with self._lock:
+            with closing(self._connect()) as conn:
+                row = conn.execute(
+                    "SELECT payload FROM application_drafts WHERE draft_id = ?",
+                    (draft_id,),
+                ).fetchone()
+                if not row:
+                    return None
+                return ApplicationDraft.model_validate_json(row["payload"])
 
     async def list_by_report(self, report_id: str, *, limit: int = 50) -> List[ApplicationDraft]:
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
-                """
-                SELECT payload FROM application_drafts
-                WHERE report_id = ?
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (report_id, limit),
-            ).fetchall()
-            return [ApplicationDraft.model_validate_json(r["payload"]) for r in rows]
+        async with self._lock:
+            with closing(self._connect()) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT payload FROM application_drafts
+                    WHERE report_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (report_id, limit),
+                ).fetchall()
+                return [ApplicationDraft.model_validate_json(r["payload"]) for r in rows]
 
     async def save(self, draft: ApplicationDraft) -> ApplicationDraft:
         draft.updated_at = time.time()

@@ -2,7 +2,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from src.core.client import DEFAULT_GEMINI_MODEL
 from src.drafter.browser import BrowserDriver, get_browser_driver
@@ -24,6 +24,73 @@ StepCallback = Callable[[BrowserStepEvent, Optional[DraftStatus]], Awaitable[Non
 
 def _field_key(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", (label or "field").lower()).strip("_")
+
+
+_SENSITIVE_COMPLIANCE_PATTERNS = (
+    "ein",
+    "tax_id",
+    "taxid",
+    "uei",
+    "sam_gov",
+    "sam_uei",
+    "duns",
+    "ssn",
+    "social_security",
+    "audited_revenue",
+    "cpa_audited",
+    "determination_date",
+    "bank_account",
+    "routing_number",
+)
+
+
+def _is_sensitive_compliance_field(selector: str, label: str) -> bool:
+    slug = f"{_field_key(selector)} {_field_key(label)}"
+    return any(tok in slug.split("_") or tok in slug for tok in _SENSITIVE_COMPLIANCE_PATTERNS)
+
+
+def _resolve_fact_from_ledger(
+    selector: str,
+    canonical_label: str,
+    fact_ledger: Dict[str, Any],
+) -> Optional[str]:
+    """
+    Deterministically resolves a value from `user_supplied_facts` or `intake_data`
+    matching selector, selector without '#', canonical field_key, or semantic compliance token.
+    """
+    user_facts: Dict[str, Any] = fact_ledger.get("user_supplied_facts") or {}
+    intake_data: Dict[str, Any] = fact_ledger.get("intake_data") or {}
+    clean_sel = selector.lstrip("#")
+    canon_key = _field_key(canonical_label)
+    sel_key = _field_key(clean_sel)
+
+    candidates = [selector, clean_sel, canon_key, sel_key]
+    for source_dict in (user_facts, intake_data):
+        for cand in candidates:
+            val = source_dict.get(cand)
+            if val is not None and str(val).strip():
+                return str(val).strip()
+        # Semantic alias match for user_supplied_facts (e.g. 'ein' matching '#federal_ein' or 'federal_ein_tax_id...')
+        for k, v in source_dict.items():
+            if v is None or not str(v).strip():
+                continue
+            k_slug = _field_key(str(k))
+            if not k_slug:
+                continue
+            for tok in _SENSITIVE_COMPLIANCE_PATTERNS:
+                if tok in k_slug and (tok in canon_key or tok in sel_key):
+                    return str(v).strip()
+    return None
+
+
+def _truncate_to_maxlength(value: str, maxlength: Optional[int]) -> str:
+    if not maxlength or maxlength <= 0 or len(value) <= maxlength:
+        return value
+    clipped = value[:maxlength]
+    last_space = clipped.rfind(" ")
+    if last_space > int(maxlength * 0.7):
+        return clipped[:last_space].rstrip()
+    return clipped
 
 
 class BrowserDraftOrchestrator:
@@ -99,9 +166,36 @@ class BrowserDraftOrchestrator:
         blocked_reason: Optional[str] = None
 
         session = await self.browser_driver.open_session(validated_url)
+        seen_page_signatures: set[tuple[str, str, tuple[str, ...]]] = set()
         try:
             for wizard_page in range(1, self.max_wizard_steps + 1):
                 schema = await session.inspect_form()
+                page_sig = (
+                    schema.page_url,
+                    schema.heading,
+                    tuple(f.selector for f in schema.fields),
+                )
+                if schema.fields and page_sig in seen_page_signatures:
+                    # Client-side validation prevented advancing to a new page; stop cleanly
+                    latest_screenshot = await session.capture_screenshot(
+                        label="Paused — Portal Validation Requires Missing Inputs"
+                    )
+                    step_counter += 1
+                    await self._emit_step(
+                        step_log=step_log,
+                        step_event=BrowserStepEvent(
+                            step_index=step_counter,
+                            stage="paused_for_review",
+                            action="Portal remained on the same step (validation requires missing user inputs); paused for human review.",
+                            screenshot_b64=latest_screenshot,
+                        ),
+                        status="ready_for_review",
+                        on_step=on_step,
+                    )
+                    final_status = "ready_for_review"
+                    break
+                seen_page_signatures.add(page_sig)
+
                 latest_screenshot = await session.capture_screenshot(
                     label=schema.heading or f"Inspecting Page {wizard_page}"
                 )
@@ -175,16 +269,32 @@ class BrowserDraftOrchestrator:
                 if fill_plan.narrative_summary_markdown.strip():
                     narrative_chunks.append(fill_plan.narrative_summary_markdown.strip())
 
-                valid_selectors = {f.selector for f in schema.fields}
+                schema_by_selector = {f.selector: f for f in schema.fields}
 
-                # Stage 3: Execute fill actions step-by-step
+                # Stage 3: Execute fill actions step-by-step with programmatic ApplicantFactLedger enforcement
                 for action in fill_plan.actions:
-                    if action.selector not in valid_selectors:
+                    schema_field = schema_by_selector.get(action.selector)
+                    if schema_field is None:
                         continue
 
-                    if action.action_type == "skip_missing" or action.value is None:
-                        q = action.missing_question or f"Please provide '{action.field_label}'"
-                        key = _field_key(action.field_label)
+                    canonical_label = schema_field.label or action.field_label
+                    effective_type = action.action_type
+                    effective_val = action.value
+
+                    # 1. Deterministic override if user_supplied_facts / intake_data has a verified value
+                    ledger_val = _resolve_fact_from_ledger(action.selector, canonical_label, fact_ledger)
+                    if ledger_val is not None and (effective_type == "skip_missing" or _is_sensitive_compliance_field(action.selector, canonical_label)):
+                        effective_type = "select" if schema_field.input_type == "select" else "fill"
+                        effective_val = ledger_val
+
+                    # 2. Anti-Fabrication Guard: never allow unverified values in sensitive compliance/financial fields
+                    if _is_sensitive_compliance_field(action.selector, canonical_label) and ledger_val is None:
+                        effective_type = "skip_missing"
+                        effective_val = None
+
+                    if effective_type == "skip_missing" or effective_val is None:
+                        q = action.missing_question or f"Please provide '{canonical_label}'"
+                        key = _field_key(canonical_label)
                         missing_by_key[key] = MissingInputField(
                             field_key=key,
                             question=q,
@@ -193,7 +303,7 @@ class BrowserDraftOrchestrator:
                         filled_fields.append(
                             FilledFieldRecord(
                                 selector=action.selector,
-                                field_label=action.field_label,
+                                field_label=canonical_label,
                                 value=None,
                                 status="skipped_missing",
                                 missing_question=q,
@@ -205,8 +315,8 @@ class BrowserDraftOrchestrator:
                             step_event=BrowserStepEvent(
                                 step_index=step_counter,
                                 stage="filling",
-                                field_label=action.field_label,
-                                action=f"Skipped '{action.field_label}' (flagged for user input)",
+                                field_label=canonical_label,
+                                action=f"Skipped '{canonical_label}' (flagged for user input)",
                                 status="skipped_missing",
                                 screenshot_b64=latest_screenshot,
                             ),
@@ -215,28 +325,45 @@ class BrowserDraftOrchestrator:
                         )
                         continue
 
+                    # 3. Enforce maxlength and select option constraints programmatically
+                    if schema_field.input_type == "select" and schema_field.options:
+                        effective_type = "select"
+                        if effective_val not in schema_field.options:
+                            # Match case-insensitively or substring if possible, else first valid option
+                            matched_opt = next(
+                                (
+                                    opt
+                                    for opt in schema_field.options
+                                    if effective_val.lower() in opt.lower() or opt.lower() in effective_val.lower()
+                                ),
+                                schema_field.options[0],
+                            )
+                            effective_val = matched_opt
+                    elif schema_field.maxlength:
+                        effective_val = _truncate_to_maxlength(effective_val, schema_field.maxlength)
+
                     try:
-                        await session.fill_field(action.selector, action.value, action.action_type)
+                        await session.fill_field(action.selector, effective_val, effective_type)
                         latest_screenshot = await session.capture_screenshot(
-                            label=f"Filled {action.field_label}"
+                            label=f"Filled {canonical_label}"
                         )
                         filled_fields.append(
                             FilledFieldRecord(
                                 selector=action.selector,
-                                field_label=action.field_label,
-                                value=action.value,
+                                field_label=canonical_label,
+                                value=effective_val,
                                 status="filled",
                             )
                         )
                         step_counter += 1
-                        preview = action.value if len(action.value) <= 60 else action.value[:57] + "..."
+                        preview = effective_val if len(effective_val) <= 60 else effective_val[:57] + "..."
                         await self._emit_step(
                             step_log=step_log,
                             step_event=BrowserStepEvent(
                                 step_index=step_counter,
                                 stage="filling",
-                                field_label=action.field_label,
-                                action=f"Filled '{action.field_label}': {preview}",
+                                field_label=canonical_label,
+                                action=f"Filled '{canonical_label}': {preview}",
                                 status="ok",
                                 screenshot_b64=latest_screenshot,
                             ),
@@ -248,7 +375,7 @@ class BrowserDraftOrchestrator:
                         filled_fields.append(
                             FilledFieldRecord(
                                 selector=action.selector,
-                                field_label=action.field_label,
+                                field_label=canonical_label,
                                 value=None,
                                 status="error",
                                 missing_question=f"Could not auto-fill: {fill_exc}",

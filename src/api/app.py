@@ -552,6 +552,7 @@ async def revise_application_draft(draft_id: str, req: DraftReviseRequest):
     draft.step_log = []
     draft.filled_fields = []
     draft.missing_inputs = []
+    draft.latest_screenshot_b64 = None
     await draft_repository.save(draft)
 
     opp_context = next((o for o in report.opportunities if o.name == draft.opportunity_name), None)

@@ -676,8 +676,18 @@ async def run_benchmark(
 
 
 if __name__ == "__main__":
+    from src.evals.drafter_evals import run_drafter_benchmark
+
     dataset_path = Path("evals/datasets/messy_intakes_v1.jsonl")
     out = asyncio.run(run_benchmark(export_dataset_path=dataset_path))
+    print("=== TRACK 1: FUNDING DISCOVERY & READINESS BENCHMARK (30 CASES) ===")
     for sys_name, (agg, _) in out.items():
-        print(f"\n=== {sys_name} ===")
+        print(f"\n--- {sys_name} ---")
+        print(agg.model_dump_json(indent=2))
+
+    drafter_path = Path("evals/datasets/unseen_portals_v1.jsonl")
+    drafter_out = asyncio.run(run_drafter_benchmark(export_dataset_path=drafter_path))
+    print("\n=== TRACK 2: BROWSER-USE APPLICATION DRAFTER BENCHMARK (20 CASES) ===")
+    for sys_name, (agg, _) in drafter_out.items():
+        print(f"\n--- {sys_name} ---")
         print(agg.model_dump_json(indent=2))

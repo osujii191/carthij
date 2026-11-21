@@ -130,7 +130,7 @@ _DOM_INSPECT_JS = """
     let kind = "other";
     if (lower.includes("submit")) kind = "submit";
     else if (lower.includes("save draft")) kind = "save_draft";
-    else if (lower.includes("next") || lower.includes("continue")) kind = "next";
+    else if (lower.includes("next") || lower.includes("continue") || lower.includes("review")) kind = "next";
     const selector = btn.id ? `#${btn.id}` : `button:has-text("${text.replace(/"/g, '\\"')}")`;
     result.buttons.push({ selector, label: text, kind });
   }
@@ -218,16 +218,31 @@ class PlaywrightBrowserDriver:
             return self._browser
 
     async def open_session(self, url: str) -> BrowserSession:
+        from src.drafter.security import validate_portal_url
+
         await self._semaphore.acquire()
         try:
             browser = await self._ensure_browser()
             context = await browser.new_context(viewport={"width": 1280, "height": 800})
             page = await context.new_page()
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await page.wait_for_timeout(400)
+            # Re-validate post-redirect URL to block HTTP 302 redirect SSRF
+            validate_portal_url(page.url)
             return _PlaywrightSession(context=context, page=page, semaphore=self._semaphore)
-        except Exception:
+        except ValueError:
             self._semaphore.release()
             raise
+        except Exception as exc:
+            self._semaphore.release()
+            if os.getenv("CARTHIJ_BROWSER_STRICT", "").lower() in ("true", "1", "yes"):
+                raise
+            logger.warning(
+                "Playwright session failed for '%s' (%s); falling back to _SimulatedSession.",
+                url,
+                exc,
+            )
+            return _SimulatedSession(url=url)
 
 
 class _SimulatedSession:

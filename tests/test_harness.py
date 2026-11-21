@@ -1110,16 +1110,21 @@ class TestAgentHarness(unittest.TestCase):
                 self.assertIn("screenshot_b64", raw_sse)
                 self.assertIn("event: complete", raw_sse)
 
-                # GET draft has missing_inputs for EIN
+                # GET draft has missing_inputs for EIN and SAM.gov UEI (both blocked from fabrication)
                 get_res = client.get(f"/api/v1/drafts/{draft_id}")
                 self.assertEqual(get_res.status_code, 200)
                 self.assertEqual(get_res.json()["status"], "ready_for_review")
-                self.assertEqual(len(get_res.json()["missing_inputs"]), 1)
+                self.assertEqual(len(get_res.json()["missing_inputs"]), 2)
 
-                # Revise draft with EIN -> version 2 has 0 missing_inputs
+                # Revise draft with EIN & UEI -> version 2 has 0 missing_inputs
                 rev_res = client.post(
                     f"/api/v1/drafts/{draft_id}/revise",
-                    json={"user_supplied_facts": {"federal_ein": "12-3456789"}},
+                    json={
+                        "user_supplied_facts": {
+                            "federal_ein": "12-3456789",
+                            "sam_uei": "ABC123DEF456",
+                        }
+                    },
                 )
                 self.assertEqual(rev_res.status_code, 202)
                 with client.stream("GET", f"/api/v1/drafts/{draft_id}/stream?poll_interval_seconds=0.05") as s2:

@@ -70,7 +70,14 @@ def validate_portal_url(
 
     try:
         ip = ipaddress.ip_address(host)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
             raise ValueError(f"Blocked non-public IP address: '{host}'.")
     except ValueError as exc:
         # Re-raise our explicit security errors; ignore non-IP domain names

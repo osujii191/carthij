@@ -24,6 +24,16 @@ const safeHref = (url: string): string => {
   return trimmed.startsWith("https://") || trimmed.startsWith("http://") ? trimmed : "#";
 };
 
+const safeImageSrc = (src: string | null): string | null => {
+  if (!src) return null;
+  const trimmed = src.trim();
+  return trimmed.startsWith("data:image/jpeg;base64,") ||
+    trimmed.startsWith("data:image/png;base64,") ||
+    trimmed.startsWith("data:image/svg+xml;base64,")
+    ? trimmed
+    : null;
+};
+
 export default function DraftWorkspacePage({
   params,
 }: {
@@ -353,9 +363,9 @@ export default function DraftWorkspacePage({
               </div>
 
               <div className="bg-slate-950 min-h-[340px] flex items-center justify-center p-2">
-                {liveScreenshot ? (
+                {safeImageSrc(liveScreenshot) ? (
                   <img
-                    src={liveScreenshot}
+                    src={safeImageSrc(liveScreenshot)!}
                     alt="Live browser agent viewport screenshot"
                     className="w-full h-auto rounded-lg border border-slate-800"
                   />
