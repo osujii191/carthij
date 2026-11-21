@@ -869,6 +869,276 @@ class TestAgentHarness(unittest.TestCase):
             if os.path.exists(temp_db):
                 os.remove(temp_db)
 
+    def test_portal_url_ssrf_guard(self):
+        from src.drafter.security import validate_portal_url
+
+        # Demo portal origin & public HTTPS URLs allowed
+        self.assertEqual(
+            validate_portal_url("http://127.0.0.1:3000/demo-portal?program=NYSTAR"),
+            "http://127.0.0.1:3000/demo-portal?program=NYSTAR",
+        )
+        self.assertEqual(
+            validate_portal_url("https://grants.example.org/apply"),
+            "https://grants.example.org/apply",
+        )
+
+        # SSRF / metadata / non-HTTP schemes blocked
+        for bad_url in [
+            "file:///etc/passwd",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://10.0.0.5:8080/internal",
+            "http://127.0.0.1:8000/internal/worker/execute",
+        ]:
+            with self.assertRaises(ValueError):
+                validate_portal_url(bad_url)
+
+    def test_browser_draft_orchestrator_end_to_end_and_auth_halt(self):
+        import asyncio
+        from src.drafter.browser import SimulatedBrowserDriver
+        from src.drafter.mapper import FieldFillAction, FormFillPlan
+        from src.drafter.orchestrator import BrowserDraftOrchestrator
+        from src.models.report import FundingReport
+
+        class FakeMapper:
+            async def plan_fill(
+                self,
+                *,
+                form_schema,
+                fact_ledger,
+                opportunity_name,
+                opportunity_source_url,
+                opportunity_context=None,
+            ):
+                actions = []
+                for field in form_schema.fields:
+                    if field.selector in ("#federal_ein", "#sam_uei"):
+                        supplied = fact_ledger.get("user_supplied_facts", {}).get(field.selector)
+                        if supplied:
+                            actions.append(
+                                FieldFillAction(
+                                    selector=field.selector,
+                                    field_label=field.label,
+                                    action_type="fill",
+                                    value=supplied,
+                                )
+                            )
+                        else:
+                            actions.append(
+                                FieldFillAction(
+                                    selector=field.selector,
+                                    field_label=field.label,
+                                    action_type="skip_missing",
+                                    missing_question=f"Enter {field.label}",
+                                )
+                            )
+                    elif field.input_type == "select":
+                        actions.append(
+                            FieldFillAction(
+                                selector=field.selector,
+                                field_label=field.label,
+                                action_type="select",
+                                value=field.options[0],
+                            )
+                        )
+                    elif field.input_type == "checkbox":
+                        actions.append(
+                            FieldFillAction(
+                                selector=field.selector,
+                                field_label=field.label,
+                                action_type="check",
+                                value="true",
+                            )
+                        )
+                    else:
+                        actions.append(
+                            FieldFillAction(
+                                selector=field.selector,
+                                field_label=field.label,
+                                action_type="fill",
+                                value=f"Drafted {field.label}",
+                            )
+                        )
+                return FormFillPlan(
+                    actions=actions,
+                    narrative_summary_markdown=f"## {form_schema.heading}\nDrafted content.",
+                )
+
+        report = FundingReport(
+            report_id="rep-draft-test",
+            status="completed",
+            org_name="Hudson Grid Bio",
+            org_type="Startup",
+            target_state="NY",
+            submitter_email="founder@hudson.io",
+            intake_data={"organization_name": "Hudson Grid Bio"},
+        )
+
+        async def _run():
+            events = []
+
+            async def on_step(evt, status):
+                events.append((evt.stage, status))
+
+            orch = BrowserDraftOrchestrator(
+                browser_driver=SimulatedBrowserDriver(),
+                mapper=FakeMapper(),
+            )
+            draft = await orch.run(
+                report=report,
+                opportunity_name="NYSTAR Matching Grant",
+                opportunity_source_url="https://esd.ny.gov/nystar",
+                target_portal_url="http://127.0.0.1:3000/demo-portal",
+                on_step=on_step,
+            )
+            self.assertEqual(draft.status, "ready_for_review")
+            self.assertEqual(len(draft.missing_inputs), 2)
+            self.assertEqual(draft.metadata["fields_skipped_missing"], 2)
+            self.assertGreaterEqual(draft.metadata["fields_filled"], 10)
+            self.assertIsNotNone(draft.latest_screenshot_b64)
+            self.assertEqual(events[-1][0], "paused_for_review")
+
+            # Auth/login wall must halt immediately with awaiting_human_action
+            blocked = await orch.run(
+                report=report,
+                opportunity_name="Gated Portal Grant",
+                opportunity_source_url="https://example.gov/apply",
+                target_portal_url="https://example.gov/login",
+            )
+            self.assertEqual(blocked.status, "awaiting_human_action")
+            self.assertIn("login", (blocked.metadata.get("blocked_reason") or "").lower())
+
+        asyncio.run(_run())
+
+    def test_draft_api_create_stream_revise_and_export(self):
+        import asyncio
+        import os
+        import tempfile
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        import src.api.app as api_app
+        from src.core.draft_repository import SQLiteDraftRepository
+        from src.core.repository import SQLiteReportRepository
+        from src.drafter.browser import SimulatedBrowserDriver
+        from src.drafter.mapper import FieldFillAction, FormFillPlan
+        from src.drafter.orchestrator import BrowserDraftOrchestrator
+        from src.models.report import FundingOpportunity, FundingReport
+
+        class FakeMapper:
+            async def plan_fill(self, *, form_schema, fact_ledger, **kwargs):
+                actions = []
+                for field in form_schema.fields:
+                    if field.selector == "#federal_ein":
+                        ein = fact_ledger.get("user_supplied_facts", {}).get("federal_ein")
+                        if ein:
+                            actions.append(FieldFillAction(selector=field.selector, field_label=field.label, action_type="fill", value=ein))
+                        else:
+                            actions.append(FieldFillAction(selector=field.selector, field_label=field.label, action_type="skip_missing", missing_question="Provide Federal EIN"))
+                    elif field.input_type == "select":
+                        actions.append(FieldFillAction(selector=field.selector, field_label=field.label, action_type="select", value=field.options[0]))
+                    elif field.input_type == "checkbox":
+                        actions.append(FieldFillAction(selector=field.selector, field_label=field.label, action_type="check", value="true"))
+                    else:
+                        actions.append(FieldFillAction(selector=field.selector, field_label=field.label, action_type="fill", value="Test Value"))
+                return FormFillPlan(actions=actions, narrative_summary_markdown="## Draft Narrative\nGrounded copy.")
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            temp_db = f.name
+
+        orig_report_repo = api_app.report_repository
+        orig_draft_repo = api_app.draft_repository
+
+        try:
+            rep_repo = SQLiteReportRepository(db_path=temp_db)
+            drf_repo = SQLiteDraftRepository(db_path=temp_db)
+            api_app.report_repository = rep_repo
+            api_app.draft_repository = drf_repo
+
+            report = FundingReport(
+                report_id="rep-api-draft",
+                status="completed",
+                org_name="Hudson Grid Bio",
+                org_type="Startup",
+                target_state="NY",
+                submitter_email="founder@hudson.io",
+                intake_data={"organization_name": "Hudson Grid Bio"},
+                opportunities=[
+                    FundingOpportunity(
+                        name="NYSTAR Matching Grant",
+                        provider="ESD",
+                        scope="state",
+                        instrument="Grant",
+                        eligibility_fit="high",
+                        why_it_fits="NY startup",
+                        source_url="https://esd.ny.gov/nystar",
+                        source_id="SRC-1",
+                        citation_verified=True,
+                    )
+                ],
+            )
+            asyncio.run(rep_repo.create(report))
+
+            def _fake_orchestrator(*args, **kwargs):
+                return BrowserDraftOrchestrator(
+                    browser_driver=SimulatedBrowserDriver(),
+                    mapper=FakeMapper(),
+                )
+
+            with patch.object(api_app, "BrowserDraftOrchestrator", side_effect=_fake_orchestrator):
+                client = TestClient(api_app.app)
+
+                # SSRF URL rejected with 400
+                bad_res = client.post(
+                    "/api/v1/reports/rep-api-draft/drafts",
+                    json={"opportunity_index": 0, "target_portal_url": "http://169.254.169.254/latest/meta-data/"},
+                )
+                self.assertEqual(bad_res.status_code, 400)
+
+                # Valid draft creation -> 202 Accepted
+                post_res = client.post(
+                    "/api/v1/reports/rep-api-draft/drafts",
+                    json={"opportunity_index": 0},
+                )
+                self.assertEqual(post_res.status_code, 202)
+                draft_id = post_res.json()["draft_id"]
+
+                # SSE stream emits browser_step + complete
+                with client.stream("GET", f"/api/v1/drafts/{draft_id}/stream?poll_interval_seconds=0.05") as s:
+                    self.assertEqual(s.status_code, 200)
+                    raw_sse = "".join(s.iter_text())
+                self.assertIn("event: browser_step", raw_sse)
+                self.assertIn("screenshot_b64", raw_sse)
+                self.assertIn("event: complete", raw_sse)
+
+                # GET draft has missing_inputs for EIN
+                get_res = client.get(f"/api/v1/drafts/{draft_id}")
+                self.assertEqual(get_res.status_code, 200)
+                self.assertEqual(get_res.json()["status"], "ready_for_review")
+                self.assertEqual(len(get_res.json()["missing_inputs"]), 1)
+
+                # Revise draft with EIN -> version 2 has 0 missing_inputs
+                rev_res = client.post(
+                    f"/api/v1/drafts/{draft_id}/revise",
+                    json={"user_supplied_facts": {"federal_ein": "12-3456789"}},
+                )
+                self.assertEqual(rev_res.status_code, 202)
+                with client.stream("GET", f"/api/v1/drafts/{draft_id}/stream?poll_interval_seconds=0.05") as s2:
+                    "".join(s2.iter_text())
+                revised = client.get(f"/api/v1/drafts/{draft_id}").json()
+                self.assertEqual(revised["version"], 2)
+                self.assertEqual(len(revised["missing_inputs"]), 0)
+
+                # Export Markdown
+                exp_res = client.get(f"/api/v1/drafts/{draft_id}/export")
+                self.assertEqual(exp_res.status_code, 200)
+                self.assertIn("# Application Draft — NYSTAR Matching Grant", exp_res.text)
+                self.assertIn("12-3456789", exp_res.text)
+        finally:
+            api_app.report_repository = orig_report_repo
+            api_app.draft_repository = orig_draft_repo
+            if os.path.exists(temp_db):
+                os.remove(temp_db)
+
     def test_report_storage_lifecycle(self):
         import tempfile
         import os

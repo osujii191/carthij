@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { FundingReport } from "@/types";
+import { useRouter } from "next/navigation";
+import { DraftAcceptedResponse, FundingOpportunity, FundingReport } from "@/types";
 import SubagentCard from "./SubagentCard";
 import {
   CheckCircle,
@@ -11,6 +12,8 @@ import {
   ListChecks,
   BookOpen,
   Award,
+  Sparkles,
+  Loader2,
 } from "lucide-react";
 
 interface ResultsPanelProps {
@@ -37,7 +40,35 @@ const safeHref = (url: string): string => {
 };
 
 export default function ResultsPanel({ report }: ResultsPanelProps) {
+  const router = useRouter();
   const [scopeFilter, setScopeFilter] = useState<string>("all");
+  const [draftingOpp, setDraftingOpp] = useState<string | null>(null);
+  const [draftError, setDraftError] = useState<string | null>(null);
+
+  const handleDraftApplication = async (opp: FundingOpportunity) => {
+    setDraftError(null);
+    setDraftingOpp(opp.name);
+    try {
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const res = await fetch(`${apiBase}/api/v1/reports/${report.report_id}/drafts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          opportunity_name: opp.name,
+          opportunity_source_url: opp.source_url,
+        }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Failed to start draft (${res.status})`);
+      }
+      const accepted: DraftAcceptedResponse = await res.json();
+      router.push(`/reports/${report.report_id}/drafts/${accepted.draft_id}`);
+    } catch (err: any) {
+      setDraftError(err.message || "Could not launch browser-use application drafter.");
+      setDraftingOpp(null);
+    }
+  };
 
   const filteredOpportunities = report.opportunities.filter((opp) => {
     if (scopeFilter === "all") return true;
@@ -122,6 +153,12 @@ export default function ResultsPanel({ report }: ResultsPanelProps) {
           </div>
         </div>
 
+        {draftError && (
+          <div className="mb-4 p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700">
+            {draftError}
+          </div>
+        )}
+
         {filteredOpportunities.length === 0 ? (
           <p className="text-sm text-slate-500 py-6 text-center">
             No verified opportunities matched this filter.
@@ -180,19 +217,39 @@ export default function ResultsPanel({ report }: ResultsPanelProps) {
                   )}
                 </div>
 
-                <div className="pt-3 border-t border-slate-200/70 flex items-center justify-between text-xs">
-                  <span className="font-mono text-[11px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                    {opp.citation_verified ? `Verified ${opp.source_id}` : opp.source_id}
-                  </span>
-                  <a
-                    href={safeHref(opp.source_url)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 font-semibold text-blue-600 hover:underline"
+                <div className="pt-3 border-t border-slate-200/70 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[11px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                      {opp.citation_verified ? `Verified ${opp.source_id}` : opp.source_id}
+                    </span>
+                    <a
+                      href={safeHref(opp.source_url)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 font-semibold text-blue-600 hover:underline"
+                    >
+                      <span>Source</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleDraftApplication(opp)}
+                    disabled={draftingOpp !== null}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-blue-700 disabled:opacity-60 text-white text-[11px] font-semibold transition-colors shadow-sm"
                   >
-                    <span>Official Source</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
+                    {draftingOpp === opp.name ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Launching Agent...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Draft &amp; Pre-Fill</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </article>
             ))}

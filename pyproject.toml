@@ -18,6 +18,9 @@ gcp = [
     "google-cloud-firestore>=2.19.0",
     "google-cloud-tasks>=2.16.0",
 ]
+browser = [
+    "playwright>=1.49.0",
+]
 dev = [
     "mypy>=1.8.0",
     "pytest>=8.0.0",

@@ -15,7 +15,7 @@ else:
 from typing import AsyncGenerator, List, Optional
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 import httpx
 from pydantic import BaseModel
 import uvicorn
@@ -24,8 +24,19 @@ from src.agents.coordinator import CoordinatorAgent
 from src.agents.planner import QueryExecutionReport, QueryPlan, QueryPlanner
 from src.api.schemas import FormSubmissionRequest, SubagentResult, WorkflowExecutionResponse
 from src.core.dispatcher import JobDispatcher, JobPayload, get_job_dispatcher
+from src.core.draft_repository import DraftRepository, get_draft_repository
 from src.core.repository import ReportRepository, get_report_repository
-from src.models.report import FundingReport, StageProgress
+from src.drafter.orchestrator import BrowserDraftOrchestrator
+from src.drafter.security import default_demo_portal_url, validate_portal_url
+from src.models.draft import (
+    ApplicationDraft,
+    BrowserStepEvent,
+    DraftAcceptedResponse,
+    DraftCreateRequest,
+    DraftReviseRequest,
+    DraftStatus,
+)
+from src.models.report import FundingOpportunity, FundingReport, StageProgress
 from src.pipeline.orchestrator import FundingPipelineOrchestrator
 
 logging.basicConfig(level=logging.INFO)
@@ -45,8 +56,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Active repository & job dispatcher (overridable in tests)
+# Active repositories & job dispatcher (overridable in tests)
 report_repository: ReportRepository = get_report_repository()
+draft_repository: DraftRepository = get_draft_repository()
+_active_draft_tasks: set[asyncio.Task] = set()
 
 
 class ReportAcceptedResponse(BaseModel):
@@ -295,6 +308,315 @@ async def internal_worker_execute(
 
     await execute_report_job(payload)
     return {"status": "ok", "report_id": payload.report_id}
+
+
+# ---------------------------------------------------------------------------
+# Browser-Use Application Drafting Endpoints (Draft Phase C)
+# ---------------------------------------------------------------------------
+
+def _spawn_draft_task(coro) -> None:
+    task = asyncio.create_task(coro)
+    _active_draft_tasks.add(task)
+    task.add_done_callback(_active_draft_tasks.discard)
+
+
+async def execute_draft_job(
+    *,
+    draft_id: str,
+    report: FundingReport,
+    opportunity_name: str,
+    opportunity_source_url: str,
+    opportunity_context: Optional[FundingOpportunity],
+    target_portal_url: str,
+    user_supplied_facts: dict[str, str],
+    version: int,
+    created_at: float,
+    orchestrator: Optional[BrowserDraftOrchestrator] = None,
+) -> None:
+    runner = orchestrator or BrowserDraftOrchestrator()
+
+    async def _on_step(step: BrowserStepEvent, next_status: Optional[DraftStatus]) -> None:
+        await draft_repository.append_browser_step(draft_id, step, status=next_status)
+
+    try:
+        completed_draft = await runner.run(
+            report=report,
+            opportunity_name=opportunity_name,
+            opportunity_source_url=opportunity_source_url,
+            opportunity_context=opportunity_context,
+            target_portal_url=target_portal_url,
+            user_supplied_facts=user_supplied_facts,
+            draft_id=draft_id,
+            version=version,
+            created_at=created_at,
+            on_step=_on_step,
+        )
+        await draft_repository.save(completed_draft)
+    except Exception as exc:
+        logger.exception("Browser draft job %s failed: %s", draft_id, exc)
+        await draft_repository.mark_failed(draft_id, str(exc))
+
+
+@app.post(
+    "/api/v1/reports/{report_id}/drafts",
+    response_model=DraftAcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Start a browser-use application draft & pre-fill job for a verified opportunity",
+)
+async def create_application_draft(report_id: str, req: DraftCreateRequest):
+    report = await report_repository.get(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail=f"Report '{report_id}' not found.")
+
+    opp_context: Optional[FundingOpportunity] = None
+    opp_name = (req.opportunity_name or "").strip()
+    opp_url = (req.opportunity_source_url or "").strip()
+
+    if not opp_name:
+        idx = req.opportunity_index or 0
+        if idx >= len(report.opportunities):
+            raise HTTPException(
+                status_code=400,
+                detail="No matching opportunity found on this report; specify opportunity_name or a valid opportunity_index.",
+            )
+        opp_context = report.opportunities[idx]
+        opp_name = opp_context.name
+        opp_url = opp_context.source_url
+    else:
+        opp_context = next((o for o in report.opportunities if o.name == opp_name), None)
+        if not opp_url and opp_context is not None:
+            opp_url = opp_context.source_url
+
+    raw_portal_url = req.target_portal_url or default_demo_portal_url(opp_name)
+    try:
+        validated_portal_url = validate_portal_url(raw_portal_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    draft_id = str(uuid.uuid4())
+    now = time.time()
+    initial_draft = ApplicationDraft(
+        draft_id=draft_id,
+        report_id=report_id,
+        opportunity_name=opp_name,
+        opportunity_source_url=opp_url,
+        target_portal_url=validated_portal_url,
+        owner_uid=report.owner_uid,
+        version=1,
+        status="queued",
+        user_supplied_facts=dict(req.user_supplied_facts),
+        created_at=now,
+        updated_at=now,
+    )
+    await draft_repository.create(initial_draft)
+
+    _spawn_draft_task(
+        execute_draft_job(
+            draft_id=draft_id,
+            report=report,
+            opportunity_name=opp_name,
+            opportunity_source_url=opp_url,
+            opportunity_context=opp_context,
+            target_portal_url=validated_portal_url,
+            user_supplied_facts=dict(req.user_supplied_facts),
+            version=1,
+            created_at=now,
+        )
+    )
+    return DraftAcceptedResponse(
+        draft_id=draft_id,
+        report_id=report_id,
+        status="queued",
+        stream_url=f"/api/v1/drafts/{draft_id}/stream",
+    )
+
+
+@app.get(
+    "/api/v1/reports/{report_id}/drafts",
+    response_model=List[ApplicationDraft],
+    summary="List browser-use application drafts for a report",
+)
+async def list_report_drafts(report_id: str, limit: int = 50):
+    return await draft_repository.list_by_report(report_id, limit=min(max(limit, 1), 100))
+
+
+@app.get(
+    "/api/v1/drafts/{draft_id}",
+    response_model=ApplicationDraft,
+    summary="Get canonical ApplicationDraft by ID",
+)
+async def get_application_draft(draft_id: str):
+    draft = await draft_repository.get(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail=f"Draft '{draft_id}' not found.")
+    return draft
+
+
+@app.get(
+    "/api/v1/drafts/{draft_id}/stream",
+    summary="Stream live browser-use pre-fill steps and screenshots via SSE",
+)
+async def stream_draft_progress(
+    draft_id: str,
+    request: Request,
+    poll_interval_seconds: float = 0.75,
+    max_duration_seconds: float = 300.0,
+):
+    existing = await draft_repository.get(draft_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Draft '{draft_id}' not found.")
+
+    interval = max(0.05, min(poll_interval_seconds, 5.0))
+    deadline = time.monotonic() + max(5.0, min(max_duration_seconds, 600.0))
+
+    async def _event_generator() -> AsyncGenerator[str, None]:
+        sent_steps = 0
+        last_sent_screenshot: Optional[str] = None
+        while True:
+            if await request.is_disconnected():
+                break
+
+            current = await draft_repository.get(draft_id)
+            if current is None:
+                yield f"event: error\ndata: {json.dumps({'detail': 'Draft not found'})}\n\n"
+                break
+
+            while sent_steps < len(current.step_log):
+                step_meta = dict(current.step_log[sent_steps])
+                sent_steps += 1
+                # Attach latest_screenshot_b64 on the newest step in this poll batch
+                if (
+                    sent_steps == len(current.step_log)
+                    and current.latest_screenshot_b64
+                    and current.latest_screenshot_b64 != last_sent_screenshot
+                ):
+                    step_meta["screenshot_b64"] = current.latest_screenshot_b64
+                    last_sent_screenshot = current.latest_screenshot_b64
+                yield f"event: browser_step\ndata: {json.dumps(step_meta)}\n\n"
+
+            if current.status in ("ready_for_review", "awaiting_human_action", "failed"):
+                terminal_event = "error" if current.status == "failed" else "complete"
+                yield (
+                    f"event: {terminal_event}\n"
+                    f"data: {json.dumps({'draft_id': current.draft_id, 'status': current.status})}\n\n"
+                )
+                break
+
+            if time.monotonic() >= deadline:
+                yield (
+                    f"event: timeout\n"
+                    f"data: {json.dumps({'draft_id': draft_id, 'detail': 'Stream timeout reached'})}\n\n"
+                )
+                break
+
+            await asyncio.sleep(interval)
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post(
+    "/api/v1/drafts/{draft_id}/revise",
+    response_model=DraftAcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Supply answers to missing_inputs and re-run browser pre-fill",
+)
+async def revise_application_draft(draft_id: str, req: DraftReviseRequest):
+    draft = await draft_repository.get(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail=f"Draft '{draft_id}' not found.")
+
+    report = await report_repository.get(draft.report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail=f"Parent report '{draft.report_id}' not found.")
+
+    merged_facts = {**draft.user_supplied_facts, **req.user_supplied_facts}
+    portal_url = req.target_portal_url or draft.target_portal_url
+    try:
+        validated_portal_url = validate_portal_url(portal_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    next_version = draft.version + 1
+    draft.version = next_version
+    draft.status = "queued"
+    draft.user_supplied_facts = merged_facts
+    draft.target_portal_url = validated_portal_url
+    draft.step_log = []
+    draft.filled_fields = []
+    draft.missing_inputs = []
+    await draft_repository.save(draft)
+
+    opp_context = next((o for o in report.opportunities if o.name == draft.opportunity_name), None)
+    _spawn_draft_task(
+        execute_draft_job(
+            draft_id=draft_id,
+            report=report,
+            opportunity_name=draft.opportunity_name,
+            opportunity_source_url=draft.opportunity_source_url,
+            opportunity_context=opp_context,
+            target_portal_url=validated_portal_url,
+            user_supplied_facts=merged_facts,
+            version=next_version,
+            created_at=draft.created_at,
+        )
+    )
+    return DraftAcceptedResponse(
+        draft_id=draft_id,
+        report_id=draft.report_id,
+        status="queued",
+        stream_url=f"/api/v1/drafts/{draft_id}/stream",
+    )
+
+
+@app.get(
+    "/api/v1/drafts/{draft_id}/export",
+    summary="Export drafted application fields and narrative as clean Markdown",
+)
+async def export_application_draft(draft_id: str):
+    draft = await draft_repository.get(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail=f"Draft '{draft_id}' not found.")
+
+    lines = [
+        f"# Application Draft — {draft.opportunity_name}",
+        "",
+        f"- **Draft ID:** `{draft.draft_id}` (v{draft.version})",
+        f"- **Status:** `{draft.status}`",
+        f"- **Target Portal:** {draft.target_portal_url}",
+        f"- **Official Program Source:** {draft.opportunity_source_url}",
+        "",
+        "## Pre-Filled Portal Fields",
+        "",
+        "| Field | Status | Value |",
+        "| :--- | :--- | :--- |",
+    ]
+    for f in draft.filled_fields:
+        val = (f.value or "*(Needs user input)*").replace("\n", " ").replace("|", "\\|")
+        lines.append(f"| {f.field_label} | `{f.status}` | {val} |")
+
+    if draft.missing_inputs:
+        lines.extend(["", "## Missing User Inputs Required Before Submission", ""])
+        for m in draft.missing_inputs:
+            lines.append(f"- [ ] **{m.field_key}**: {m.question}")
+
+    if draft.drafted_narrative_markdown:
+        lines.extend(["", "## Drafted Narrative Sections", "", draft.drafted_narrative_markdown])
+
+    return PlainTextResponse(
+        "\n".join(lines) + "\n",
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="carthij-draft-{draft.draft_id[:8]}.md"'
+        },
+    )
 
 
 @app.post(

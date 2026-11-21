@@ -93,6 +93,72 @@ export interface ReportAcceptedResponse {
   stream_url: string;
 }
 
+export type DraftStatus =
+  | "queued"
+  | "in_progress"
+  | "ready_for_review"
+  | "awaiting_human_action"
+  | "failed";
+
+export interface BrowserStepEvent {
+  step_index: number;
+  stage:
+    | "inspecting"
+    | "mapping"
+    | "filling"
+    | "advancing_step"
+    | "paused_for_review"
+    | "awaiting_human_action";
+  field_label?: string | null;
+  action: string;
+  status: "ok" | "skipped_missing" | "blocked" | "error";
+  screenshot_b64?: string | null;
+  timestamp: number;
+}
+
+export interface FilledFieldRecord {
+  selector: string;
+  field_label: string;
+  value?: string | null;
+  status: "filled" | "skipped_missing" | "error";
+  missing_question?: string | null;
+}
+
+export interface MissingInputField {
+  field_key: string;
+  question: string;
+  selector?: string | null;
+  user_answer?: string | null;
+}
+
+export interface ApplicationDraft {
+  draft_id: string;
+  report_id: string;
+  opportunity_name: string;
+  opportunity_source_url: string;
+  target_portal_url: string;
+  owner_uid?: string | null;
+  version: number;
+  status: DraftStatus;
+  filled_fields: FilledFieldRecord[];
+  missing_inputs: MissingInputField[];
+  drafted_narrative_markdown?: string | null;
+  user_supplied_facts: Record<string, string>;
+  step_log: BrowserStepEvent[];
+  latest_screenshot_b64?: string | null;
+  stage_history: StageProgress[];
+  metadata: Record<string, any>;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface DraftAcceptedResponse {
+  draft_id: string;
+  report_id: string;
+  status: string;
+  stream_url: string;
+}
+
 export interface SubagentResult {
   subagent_type: string;
   status: string;

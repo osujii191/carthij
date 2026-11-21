@@ -111,3 +111,41 @@ Addressed all P1 and high-value P2/P3 findings from [phase_1_2_code_review.md](.
 - **Stage-Proof 3-Step Demo Grant Portal** (`ui/app/demo-portal/page.tsx`):
   - Built a realistic 3-step State Innovation & Workforce Grant Portal with deterministic `id`/`name` attributes on React controlled inputs, non-blocking Step 1 navigation when `Federal EIN` / `SAM.gov UEI` are blank, 250-word abstract counter on Step 2, and missing-field warnings + Save Draft / Submit Final Application buttons on Step 3.
 - **Verification**: All 21 backend unit tests pass and `ui/` `npm run build` succeeds cleanly.
+
+---
+
+## 2026-11-21 — Draft Phase B: Playwright Browser-Use Driver, SSRF Guard, FormMapperAgent & Orchestrator (Completed)
+
+- **SSRF & Portal URL Guard** (`src/drafter/security.py`):
+  - Implemented `validate_portal_url()` allowing only `http(s)://` and the configured `DEMO_PORTAL_BASE_URL` origin while blocking cloud metadata IPs (`169.254.169.254`, `metadata.google.internal`), loopback, link-local, and RFC1918 private networks.
+- **BrowserDriver Protocol & Implementations** (`src/drafter/browser.py`):
+  - Implemented `PlaywrightBrowserDriver` sharing a single lazily-initialized Chromium `Browser` guarded by `asyncio.Semaphore(2)` with isolated contexts closed in `finally:`, DOM form schema extraction, login/CAPTCHA detection, native Playwright `.fill()`/`.select_option()`/`.check()` for React 19 controlled inputs, element highlighting, and compressed JPEG screenshot capture.
+  - Implemented `SimulatedBrowserDriver` matching the 3-step `/demo-portal` for zero-dependency unit tests and offline CI.
+- **Grounded Form Mapper & Multi-Step Orchestrator** (`src/drafter/mapper.py`, `src/drafter/orchestrator.py`):
+  - Implemented `ApplicantFactLedger` + `FormMapperAgent` (Gemini 3.8 Flash, `response_schema=FormFillPlan`) with strict anti-fabrication rules (`skip_missing` + `missing_question` for unverified facts like EIN/UEI).
+  - Implemented `BrowserDraftOrchestrator` supporting multi-step wizard navigation (`max_wizard_steps=4`), immediate halt on login/CAPTCHA (`awaiting_human_action`), live per-step `BrowserStepEvent` callbacks, and hard stop before final Submit (`ready_for_review`).
+- **Dependencies & Verification**: Added `[project.optional-dependencies] browser = ["playwright>=1.49.0"]` to `pyproject.toml`. All 24 backend unit tests pass cleanly.
+
+---
+
+## 2026-11-21 — Draft Phase C: FastAPI Draft Endpoints, Live Screenshot SSE, Revision Loop & Markdown Export (Completed)
+
+- **Browser-Use Draft API** (`src/api/app.py`):
+  - Added `POST /api/v1/reports/{report_id}/drafts` (`202 Accepted` with SSRF URL validation, initial draft persistence, and async task dispatch).
+  - Added `GET /api/v1/reports/{report_id}/drafts` and `GET /api/v1/drafts/{draft_id}`.
+  - Added `GET /api/v1/drafts/{draft_id}/stream`: multi-instance-safe SSE backed by `DraftRepository`, streaming `event: browser_step` with live `screenshot_b64` frames, disconnect/timeout guards, and terminal `complete`/`error` events.
+  - Added `POST /api/v1/drafts/{draft_id}/revise` to merge user answers to `missing_inputs`, increment `version`, and re-run browser pre-fill.
+  - Added `GET /api/v1/drafts/{draft_id}/export` returning a clean downloadable Markdown application package.
+- **Verification**: All 25 backend unit tests pass cleanly (`uv run --no-sync python -m unittest discover -s tests -v`).
+
+---
+
+## 2026-11-21 — Draft Phase D: Live Browser-Watch UI & Interactive Missing-Inputs Revision (Completed)
+
+- **Frontend Types & Opportunity Launch Trigger** (`ui/types/index.ts`, `ui/components/ResultsPanel.tsx`):
+  - Added TypeScript interfaces for `ApplicationDraft`, `BrowserStepEvent`, `FilledFieldRecord`, `MissingInputField`, and `DraftAcceptedResponse`.
+  - Added a **"Draft & Pre-Fill"** button on every verified `FundingOpportunity` card in `ResultsPanel.tsx` that posts to `POST /api/v1/reports/{id}/drafts` and routes directly into the Live Browser-Watch workspace.
+- **Live Browser-Watch Workspace** (`ui/app/reports/[id]/drafts/[draftId]/page.tsx`):
+  - Streams live `event: browser_step` screenshots and action logs over SSE (`GET /api/v1/drafts/{draftId}/stream`) with automatic polling fallback.
+  - Displays the Human-in-the-Loop pre-Submit safety banner, live browser viewport frame, step-by-step action log, pre-filled fields audit table, drafted narrative copy button, Markdown export button, and interactive **"Re-Fill Portal with My Inputs"** form wired to `POST /api/v1/drafts/{draftId}/revise`.
+- **Verification**: Backend unit tests (`25/25`) and Next.js production build (`npm run build`) verified cleanly.
