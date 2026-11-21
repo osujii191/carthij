@@ -96,3 +96,18 @@ Addressed all P1 and high-value P2/P3 findings from [phase_1_2_code_review.md](.
 - **P2/P3 Fixes**:
   - Isolated `callback_url` webhook delivery in its own `try/except`, added SSE timeout (`max_duration_seconds`) + `request.is_disconnected()`, enabled SQLite WAL mode, switched Firestore `.where()` to `FieldFilter`, cached `CloudTasksClient` with OIDC `audience`, added Firebase Emulator logs to `.gitignore`, added `http(s)://` link guard in `ResultsPanel.tsx`, normalized `STATE_GUIDANCE` aliases, deduplicated `readiness_gaps`, added synthesizer fallback + fail-fast when all specialists fail, emitted `"extracting"` after `/search` completes, and closed legacy SQLite connections cleanly.
 - **Verification**: All 20 backend unit tests pass with zero SQLite `ResourceWarning`s, and `ui/` `npm run build` succeeds cleanly.
+
+---
+
+## 2026-11-21 — Draft Phase A: Browser-Use Draft Models, Repository, Firestore Rules & Demo Grant Portal (Completed)
+
+- **Canonical Draft Models** (`src/models/draft.py`, `src/models/__init__.py`):
+  - Defined `ApplicationDraft`, `BrowserStepEvent`, `FilledFieldRecord`, `MissingInputField`, `DraftCreateRequest`, `DraftReviseRequest`, and `DraftAcceptedResponse`.
+  - Enforced metadata-only `step_log` serialization (`to_metadata_dict()`) paired with a single `latest_screenshot_b64` thumbnail field for Firestore 1 MiB safety and multi-instance SSE streaming.
+- **Draft Repository** (`src/core/draft_repository.py`):
+  - Implemented `DraftRepository` protocol with `SQLiteDraftRepository` (WAL mode + `asyncio.Lock`) and `FirestoreDraftRepository` (`application_drafts/{draftId}`, `FieldFilter`, `firestore.ArrayUnion` on `step_log` + atomic overwrite on `latest_screenshot_b64`).
+- **Firestore Security Rules & Indexes** (`firestore.rules`, `firestore.indexes.json`):
+  - Updated `firestore.rules` (via `firestore-rules-author`) to add locked-down rules for `application_drafts/{draftId}` (deny all client writes; owner-only authenticated reads) and added composite indexes `(report_id ASC, created_at DESC)` and `(owner_uid ASC, created_at DESC)`.
+- **Stage-Proof 3-Step Demo Grant Portal** (`ui/app/demo-portal/page.tsx`):
+  - Built a realistic 3-step State Innovation & Workforce Grant Portal with deterministic `id`/`name` attributes on React controlled inputs, non-blocking Step 1 navigation when `Federal EIN` / `SAM.gov UEI` are blank, 250-word abstract counter on Step 2, and missing-field warnings + Save Draft / Submit Final Application buttons on Step 3.
+- **Verification**: All 21 backend unit tests pass and `ui/` `npm run build` succeeds cleanly.

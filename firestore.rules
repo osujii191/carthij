@@ -39,6 +39,39 @@ rules_version = '2';
 //   - created_at: number (required, immutable, >= 0) - Unix epoch seconds
 //   - updated_at: number (required, >= created_at) - Unix epoch seconds
 //
+// Collection: application_drafts
+// Document ID: {draftId} (string, server-generated draft ID)
+// Access Architecture:
+//   - ALL writes (create, update, delete) are performed exclusively by the
+//     trusted FastAPI backend using Firebase Admin SDK / Google Cloud Firestore
+//     client (which bypasses client Security Rules). All client writes are denied.
+//   - Client reads (get, list) are denied for unauthenticated users and for
+//     internal MVP drafts where owner_uid is null. When Firebase Auth is
+//     enabled, an authenticated user may only read/query drafts whose
+//     owner_uid matches their Firebase Auth UID.
+//   - Contains sensitive applicant facts (user_supplied_facts) and narratives;
+//     strictly owner-only read access.
+//
+// Fields (ApplicationDraft):
+//   - draft_id: string (required, immutable, 1..128 chars) - canonical draft ID
+//   - report_id: string (required, immutable, 1..128 chars) - parent FundingReport ID
+//   - opportunity_name: string (required, 1..300 chars) - target funding opportunity name
+//   - opportunity_source_url: string (required, 0..2048 chars) - source URL for opportunity
+//   - target_portal_url: string (required, 1..2048 chars) - grant portal URL or local path
+//   - owner_uid: string | null (optional/nullable, immutable once set, 1..128 chars) - Firebase Auth UID
+//   - version: int (required, 1..1000) - draft revision counter
+//   - status: string (required, enum: queued|in_progress|ready_for_review|awaiting_human_action|failed)
+//   - filled_fields: list (required, <= 200 items) - FilledFieldRecord entries
+//   - missing_inputs: list (required, <= 200 items) - MissingInputField entries
+//   - drafted_narrative_markdown: string | null (optional/nullable, <= 50000 chars)
+//   - user_supplied_facts: map (required, <= 100 keys) - applicant-supplied key/value facts
+//   - step_log: list (required, <= 200 items) - metadata-only browser step events
+//   - latest_screenshot_b64: string | null (optional/nullable, <= 150000 chars) - compressed thumbnail
+//   - stage_history: list (required, <= 100 items) - StageProgress entries
+//   - metadata: map (required, <= 50 keys) - pipeline metadata
+//   - created_at: number (required, immutable, >= 0) - Unix epoch seconds
+//   - updated_at: number (required, >= created_at) - Unix epoch seconds
+//
 // ===============================================================
 
 service cloud.firestore {
@@ -65,6 +98,13 @@ service cloud.firestore {
       return isAuthenticated() &&
         resource.data.owner_uid is string &&
         request.auth.uid == resource.data.owner_uid;
+    }
+
+    // Check if the authenticated user owns the existing application draft document.
+    // Mirrors isReportOwner(): explicitly requires owner_uid to be a string so
+    // drafts with owner_uid == null (unauthenticated MVP) are never readable by clients.
+    function isDraftOwner() {
+      return isReportOwner();
     }
 
     // Validate that the document contains only the allowed fields.
@@ -184,6 +224,78 @@ service cloud.firestore {
         data.updated_at is number && data.updated_at >= data.created_at;
     }
 
+    // Note: Client writes to /application_drafts are currently denied (backend-only
+    // via Firebase Admin SDK). This validator defines the canonical ApplicationDraft
+    // schema contract for reference and future client-write hardening (must be
+    // called on both create and update if ever enabled).
+    function isValidApplicationDraft(data) {
+      let allowedFields = [
+        'draft_id',
+        'report_id',
+        'opportunity_name',
+        'opportunity_source_url',
+        'target_portal_url',
+        'owner_uid',
+        'version',
+        'status',
+        'filled_fields',
+        'missing_inputs',
+        'drafted_narrative_markdown',
+        'user_supplied_facts',
+        'step_log',
+        'latest_screenshot_b64',
+        'stage_history',
+        'metadata',
+        'created_at',
+        'updated_at'
+      ];
+      let requiredFields = [
+        'draft_id',
+        'report_id',
+        'opportunity_name',
+        'opportunity_source_url',
+        'target_portal_url',
+        'version',
+        'status',
+        'filled_fields',
+        'missing_inputs',
+        'user_supplied_facts',
+        'step_log',
+        'stage_history',
+        'metadata',
+        'created_at',
+        'updated_at'
+      ];
+      let validStatuses = [
+        'queued',
+        'in_progress',
+        'ready_for_review',
+        'awaiting_human_action',
+        'failed'
+      ];
+
+      return hasOnlyAllowedFields(allowedFields) &&
+        hasRequiredFields(requiredFields) &&
+        validStringLength(data.draft_id, 1, 128) &&
+        validStringLength(data.report_id, 1, 128) &&
+        validStringLength(data.opportunity_name, 1, 300) &&
+        validStringLength(data.opportunity_source_url, 0, 2048) &&
+        validStringLength(data.target_portal_url, 1, 2048) &&
+        (!('owner_uid' in data) || isNullableString(data.owner_uid, 1, 128)) &&
+        data.version is int && data.version >= 1 && data.version <= 1000 &&
+        data.status in validStatuses &&
+        isValidList(data.filled_fields, 200) &&
+        isValidList(data.missing_inputs, 200) &&
+        (!('drafted_narrative_markdown' in data) || isNullableString(data.drafted_narrative_markdown, 0, 50000)) &&
+        isValidMapSize(data.user_supplied_facts, 100) &&
+        isValidList(data.step_log, 200) &&
+        (!('latest_screenshot_b64' in data) || isNullableString(data.latest_screenshot_b64, 0, 150000)) &&
+        isValidList(data.stage_history, 100) &&
+        isValidMapSize(data.metadata, 50) &&
+        data.created_at is number && data.created_at >= 0 &&
+        data.updated_at is number && data.updated_at >= data.created_at;
+    }
+
     // ===============================================================
     // Collection Rules
     // ===============================================================
@@ -196,6 +308,20 @@ service cloud.firestore {
       // - Authenticated users can only get or query (where owner_uid == uid)
       //   their own reports, protecting submitter_email PII and report data.
       allow read: if isReportOwner();
+
+      // All writes (create, update, delete) are performed exclusively by the
+      // trusted FastAPI backend via Firebase Admin SDK / GCP Firestore client.
+      allow write: if false;
+    }
+
+    match /application_drafts/{draftId} {
+      // Auth-ready owner-only reads (covers both get and list):
+      // - Unauthenticated clients cannot read any application draft.
+      // - Drafts with owner_uid == null (unauthenticated MVP) cannot be
+      //   read directly from clients.
+      // - Authenticated users can only get or query (where owner_uid == uid)
+      //   their own drafts, protecting applicant facts and narrative drafts.
+      allow read: if isDraftOwner();
 
       // All writes (create, update, delete) are performed exclusively by the
       // trusted FastAPI backend via Firebase Admin SDK / GCP Firestore client.

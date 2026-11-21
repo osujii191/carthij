@@ -806,6 +806,69 @@ class TestAgentHarness(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_sqlite_draft_repository_single_thumbnail_and_step_log(self):
+        import asyncio
+        import os
+        import tempfile
+        from src.core.draft_repository import SQLiteDraftRepository
+        from src.models.draft import ApplicationDraft, BrowserStepEvent
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            temp_db = f.name
+
+        async def _run():
+            repo = SQLiteDraftRepository(db_path=temp_db)
+            draft = ApplicationDraft(
+                draft_id="draft-1",
+                report_id="rep-1",
+                opportunity_name="NYSTAR Matching Grant",
+                opportunity_source_url="https://esd.ny.gov/nystar",
+                target_portal_url="http://127.0.0.1:3000/demo-portal",
+                owner_uid="user-1",
+            )
+            await repo.create(draft)
+
+            await repo.append_browser_step(
+                "draft-1",
+                BrowserStepEvent(
+                    step_index=1,
+                    stage="filling",
+                    field_label="Organization Legal Name",
+                    action="Filled 'Hudson Grid Bio'",
+                    screenshot_b64="FRAME_1_BASE64",
+                ),
+                status="in_progress",
+            )
+            await repo.append_browser_step(
+                "draft-1",
+                BrowserStepEvent(
+                    step_index=2,
+                    stage="paused_for_review",
+                    field_label=None,
+                    action="Stopped before final submit",
+                    screenshot_b64="FRAME_2_BASE64",
+                ),
+                status="ready_for_review",
+            )
+
+            loaded = await repo.get("draft-1")
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.status, "ready_for_review")
+            self.assertEqual(len(loaded.step_log), 2)
+            # step_log must NEVER store screenshot_b64 blobs; latest_screenshot_b64 holds only the newest frame
+            self.assertNotIn("screenshot_b64", loaded.step_log[0])
+            self.assertEqual(loaded.latest_screenshot_b64, "FRAME_2_BASE64")
+
+            by_rep = await repo.list_by_report("rep-1")
+            self.assertEqual(len(by_rep), 1)
+            self.assertEqual(by_rep[0].draft_id, "draft-1")
+
+        try:
+            asyncio.run(_run())
+        finally:
+            if os.path.exists(temp_db):
+                os.remove(temp_db)
+
     def test_report_storage_lifecycle(self):
         import tempfile
         import os
