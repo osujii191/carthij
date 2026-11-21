@@ -1,15 +1,15 @@
-# Phase 1 & Phase 2 Code Review
+# Phase 1, Phase 2 & Phase 3 Code Review
 
 **Date:** 2026-11-21  
-**Scope:** Review of Phase 1 (Retrieval & Canonical Models) and Phase 2 (Opinionated Specialists & Grounding) implementation against [backend_architecture_plan.md](./backend_architecture_plan.md) and [development_log.md](./development_log.md).
+**Scope:** Review of Phase 1 (Retrieval & Canonical Models), Phase 2 (Opinionated Specialists & Grounding), and Phase 3 (Firestore Repository, Security Rules, Job Dispatcher & SSE Streaming) implementation against [backend_architecture_plan.md](./backend_architecture_plan.md) and [development_log.md](./development_log.md).
 
 ---
 
 ## 1. Executive Summary
 
-Phase 1 and Phase 2 have been implemented with high fidelity to the architecture plan. All unit tests in `tests/test_harness.py` pass cleanly. The modular boundaries between retrieval (`src/core/tavily.py`, `src/pipeline/registry.py`, `src/agents/planner.py`), specialist execution (`src/core/agent.py`, `src/agents/specialists/`), grounding (`src/pipeline/grounding.py`), synthesis (`src/agents/synthesizer.py`), and orchestration (`src/pipeline/orchestrator.py`) are clean, readable, and well-typed.
+Phases 1, 2, and 3 have been implemented with high fidelity to the architecture plan. All 18 unit tests in `tests/test_harness.py` pass cleanly. The modular boundaries between retrieval (`src/core/tavily.py`, `src/pipeline/registry.py`, `src/agents/planner.py`), specialist execution (`src/core/agent.py`, `src/agents/specialists/`), grounding (`src/pipeline/grounding.py`), synthesis (`src/agents/synthesizer.py`), orchestration (`src/pipeline/orchestrator.py`), persistence (`src/core/repository.py`, `firestore.rules`, `firestore.indexes.json`), async dispatch (`src/core/dispatcher.py`), and API/SSE (`src/api/app.py`) are clean, readable, and well-typed.
 
-Below is a file-by-file review covering **what was done well** and **actionable findings (P1/P2/P3)** to address as the codebase moves through Phase 3 and Phase 4.
+Below is a file-by-file review covering **what was done well** and **actionable findings (P1/P2/P3)** across Phases 1, 2, and 3.
 
 ---
 
@@ -133,15 +133,91 @@ Below is a file-by-file review covering **what was done well** and **actionable 
 
 ---
 
-## 4. Summary Priority Matrix
+## 4. Phase 3 Review: Firestore Repository, Security Rules, Job Dispatcher & SSE Streaming
 
-| Priority | Component | Issue | Recommended Fix |
-| :--- | :--- | :--- | :--- |
-| **P1** | `src/pipeline/grounding.py` | `source_id` fallback (`SRC-1`) can accidentally validate a hallucinated `source_url` if the LLM guesses `"SRC-1"` | Only fall back to `get_by_id(opp.source_id)` when `opp.source_url` is blank or shares the same domain as the `SRC-N` record |
-| **P1** | `src/core/agent.py` | `self.history` persists on `BaseAgent` instance across multiple `run()` calls | Reset `self.history` per `run()` call (or default `reset_history: bool = True`) |
-| **P1** | `src/pipeline/registry.py` | `register_extract_response()` can create a disconnected `score=0.0` record if `/extract` returns a redirected URL | Map extracted content back to the requested URL record when redirected, and boost `is_extracted` in `list_sources()` |
-| **P2** | `src/pipeline/orchestrator.py` | `"searching"` and `"extracting"` SSE events fire back-to-back before `/search` runs; no fallback if `synthesizer` fails | Emit `"extracting"` between `/search` and `/extract`; fail fast if 0 specialists succeed; add fallback summary if only synthesizer fails |
-| **P2** | `src/core/agent.py` | Unchecked `response.candidates[0]` access | Guard against empty `response.candidates` |
-| **P2** | `src/pipeline/registry.py` | `normalize_url()` keeps `utm_*` and unsorted query params | Strip tracking params and sort query parameters |
-| **P3** | `src/agents/specialists/roster.py` | `STATE_GUIDANCE` only matches exact `"NY"`, `"NJ"`, `"SF"` strings | Normalize full state/city names (`"California"`, `"CA"`, `"New York"`, `"New Jersey"`) |
-| **P3** | `src/pipeline/orchestrator.py` | `readiness_gaps` from 4 specialists are concatenated without deduplication | Deduplicate overlapping gaps across specialists |
+### 4.1 `src/core/repository.py` — `ReportRepository` (`SQLiteReportRepository` & `FirestoreReportRepository`)
+**Strengths:**
+- Clean `@runtime_checkable` `ReportRepository` protocol with full parity between `SQLiteReportRepository` and `FirestoreReportRepository`.
+- Proper `closing(self._connect())` context management in `SQLiteReportRepository` (eliminating unclosed SQLite connection warnings in `repository.py`).
+- Atomic `firestore.ArrayUnion([progress.model_dump()])` in `FirestoreReportRepository.append_stage_progress()` and `mark_failed()`.
+- Seamless detection of `FIRESTORE_EMULATOR_HOST`, `REPORT_STORAGE_BACKEND=firestore`, or `USE_FIRESTORE=true` in `get_report_repository()`.
+
+**Review Comments:**
+- **[P1 — `stage_history` and `created_at` Overwrite in `execute_report_job` -> `report_repository.save(report)`]**:
+  In `src/api/app.py` (`lines 141–156`), `create_report()` creates an initial `FundingReport` with `created_at=now` and an initial `stage_history=[StageProgress(stage="queued", ...)]`. Then `execute_report_job()` runs `orchestrator.run()`, which creates a **new** `stage_history: List[StageProgress] = []` (`orchestrator.py:118`) and a new `started_at = time.time()` (`orchestrator.py:112`), and at the end calls `await report_repository.save(report)` (`app.py:74`).
+  - **Impact**: When `report_repository.save(report)` overwrites the document in SQLite or Firestore, the initial `"queued"` entry in `stage_history` (and any external stage events appended before `orchestrator.run()`) is wiped out, and `created_at` changes from the job creation timestamp to `started_at`!
+  - **Watchout with `firestore.rules`**: In `firestore.rules` (`line 40` & `line 184`), `created_at` is documented as immutable (`data.updated_at >= data.created_at`). Even though Admin SDK bypasses rules, changing `created_at` and shrinking/replacing `stage_history` on completion can also cause SSE `sent_count < len(current.stage_history)` (`app.py:219`) to be off by 1 on the final `"completed"` stage event! Specifically:
+    - During the run, `current.stage_history` in DB has `["queued", "query_planning", "searching", "extracting", "analyzing_specialists", "verifying_and_synthesizing", "completed"]` (length **7**, because `_on_progress` appended each one via `append_stage_progress`).
+    - Immediately after `_emit("completed")` finishes, `await report_repository.save(report)` overwrites `stage_history` with `orchestrator`'s list of **6** items (missing `"queued"`).
+    - If the SSE loop polls right after `save(report)`, `sent_count` is already `6` (having sent `"queued"` through `"verifying_and_synthesizing"`), and now `len(current.stage_history)` is also `6`! As a result, `while sent_count < len(current.stage_history):` does **not** execute for `"completed"`, skipping the final `stage="completed"` SSE event before emitting `event: complete`!
+  - **Recommendation**: In `execute_report_job()` (or `save()`), preserve the existing report's `created_at` and prepend/merge the initial `"queued"` stage (or have `save()` preserve the persisted `stage_history` / `created_at`), so `stage_history` is strictly append-only and never shrinks on final `save()`.
+- **[P2 — Blocking SQLite Calls on the Event Loop in `SQLiteReportRepository.get()` and `list_reports()`]**:
+  `create()`, `save()`, `append_stage_progress()`, and `mark_failed()` acquire `async with self._lock:`, whereas `get()` (`line 107`) and `list_reports()` (`line 117`) run synchronous `sqlite3` queries without acquiring `self._lock` (or `asyncio.to_thread`). While SQLite handles concurrent reads well, acquiring `self._lock` or enabling WAL mode (`PRAGMA journal_mode=WAL;`) in `_init_db()` prevents `sqlite3.OperationalError: database is locked` when SSE polling (`get()`) runs concurrently with rapid `append_stage_progress()` writes.
+- **[P2 — Deprecated Firestore `.where()` Positional Arguments Warning]**:
+  In `FirestoreReportRepository.list_reports()` (`line 281`), `query.where("owner_uid", "==", owner_uid)` uses positional arguments, which triggers a `UserWarning: Detected filter using positional arguments` in `google-cloud-firestore >= 2.11`.
+  - **Recommendation**: Use `from google.cloud.firestore_v1.base_query import FieldFilter` and `query.where(filter=FieldFilter("owner_uid", "==", owner_uid))` (or keyword `filter=`).
+
+### 4.2 `firestore.rules`, `firestore.indexes.json` & `firebase.json` — Firebase Security & Emulator Config
+**Strengths:**
+- `firestore.rules` is well-documented and secure by default: denies all client writes (`allow write: if false;`), denies unauthenticated reads, and restricts client reads on `reports/{reportId}` strictly to `resource.data.owner_uid is string && request.auth.uid == resource.data.owner_uid`, ensuring unauthenticated MVP reports (`owner_uid == null`) are never leaked to direct Firestore client queries.
+- `firestore.indexes.json` defines the exact composite index (`owner_uid ASC, created_at DESC`) needed by `FirestoreReportRepository.list_reports(owner_uid=...)`.
+- `.gitignore` needs an entry for Firebase Emulator log/cache artifacts (`*.log`, `firestore-debug.log`, `firebase-debug.log`, `.firebase/`) and `src/.env`.
+
+**Review Comments:**
+- **[P2 — Git Hygiene for Firebase Emulator & `src/.env`]**:
+  Per project Git Hygiene rules:
+  1. Introducing the Firebase Emulator Suite in `firebase.json` generates `firebase-debug.log`, `firestore-debug.log`, `ui-debug.log`, and `.firebase/` in the project root when `firebase emulators:start` runs. None of these are currently in `.gitignore`.
+  2. There is a `src/.env` file in the workspace (`find src` showed `src/.env`), while `.gitignore` only ignores root `.env` and `.env.*` (though in git, `.env` without a leading slash matches anywhere, it is safer to remove `src/.env` if unused and add `firebase-debug.log`, `firestore-debug.log`, `ui-debug.log`, `.firebase/` to `.gitignore`).
+
+### 4.3 `src/core/dispatcher.py` — `JobDispatcher` (`LocalAsyncDispatcher` & `CloudTasksDispatcher`)
+**Strengths:**
+- `LocalAsyncDispatcher` stores tasks in `self._active_tasks: Set[asyncio.Task[None]]` and cleans them up via `task.add_done_callback(self._active_tasks.discard)`, avoiding the classic Python bug where unreferenced `asyncio.create_task()` objects get garbage-collected mid-run.
+- `CloudTasksDispatcher` wraps the synchronous `tasks_v2.CloudTasksClient` call in `asyncio.to_thread(_enqueue)` so dispatching never blocks the FastAPI event loop.
+
+**Review Comments:**
+- **[P2 — Reuse `CloudTasksClient` Instead of Re-Instantiating Per Request]**:
+  In `CloudTasksDispatcher.dispatch()` (`lines 87–89`), `client = tasks_v2.CloudTasksClient()` is instantiated inside `_enqueue()` on every single dispatch call. Creating a gRPC channel and loading ADC credentials on every request adds 100–300ms of overhead and leaks gRPC channels under load.
+  - **Recommendation**: Lazily initialize `self._client: Optional[Any] = None` once on `CloudTasksDispatcher` (just like `FirestoreReportRepository._get_client()`) and reuse it across dispatches.
+- **[P2 — OIDC Token `audience` Parameter for Cloud Run]**:
+  In `CloudTasksDispatcher.dispatch()` (`lines 79–83`), `http_request["oidc_token"] = {"service_account_email": self.service_account_email}` omits `"audience"`. By default, Cloud Tasks sets the OIDC audience to the full URL including path (`https://.../internal/worker/execute`), whereas Cloud Run IAM invoker verification and standard OIDC verifiers typically expect the service base URL (`self.worker_base_url`) as `audience`.
+  - **Recommendation**: Set `"audience": self.worker_base_url` in the `oidc_token` dictionary.
+
+### 4.4 `src/api/app.py` — Canonical Report Endpoints, Worker Target & Multi-Instance SSE
+**Strengths:**
+- Clean RESTful lifecycle (`POST /api/v1/reports` -> `202 Accepted` with `stream_url`, `GET /api/v1/reports`, `GET /api/v1/reports/{report_id}`, `GET /api/v1/reports/{report_id}/stream`).
+- SSE streaming (`stream_report_progress`) is backed by `ReportRepository` and sets `Cache-Control: no-cache` and `X-Accel-Buffering: no`, making it safe across multiple Cloud Run instances.
+
+**Review Comments:**
+- **[P1 — Off-by-One SSE Stage Event Loss on Completion (`app.py:67–74` & `219–230`)]**:
+  As detailed in Section 4.1 above, `orchestrator.run()` starts with a fresh `stage_history = []` (6 stages) and `await report_repository.save(report)` overwrites the repository's `stage_history` (which had 7 stages including `"queued"`). If the SSE generator already sent 6 events (`sent_count == 6`), after `save(report)` `len(current.stage_history)` becomes `6`, so the `"completed"` `StageProgress` event is skipped in the SSE stream!
+  - **Recommendation**: Prepend the initial `"queued"` `StageProgress` (or preserve existing `stage_history` prefix and `created_at`) before `await report_repository.save(report)` in `execute_report_job()` and `submit_form_webhook()`.
+- **[P2 — SSE Stream Maximum Timeout / Client Disconnect Check]**:
+  In `stream_report_progress()` (`lines 211–233`), `while True:` polls `report_repository.get(report_id)` indefinitely if a worker crashes hard (e.g., OOM kill on Cloud Run before `mark_failed()` can run).
+  - **Recommendation**: Add a bounded max stream duration (e.g., `max_duration_seconds: float = 300.0`) or check `await request.is_disconnected()` so orphaned streams close cleanly instead of polling Firestore forever.
+- **[P2 — Callback Webhook Failure Should Not Mark Completed Report as `"failed"`]**:
+  In `execute_report_job()` (`lines 74–82`), `await report_repository.save(report)` saves the `"completed"` report, and then `await client.post(payload.callback_url, ...)` is inside the same `try` block. If the external `callback_url` returns a network error or timeout, the `except Exception:` block calls `await report_repository.mark_failed(report_id, str(exc))`, overwriting a successfully completed report with `status="failed"`!
+  - **Recommendation**: Wrap the `callback_url` POST in its own `try/except` block (logging the webhook delivery error and recording it in metadata if needed) so a third-party webhook failure never destroys a completed funding report.
+- **[P3 — Legacy `src/core/storage.py` Unclosed Connection Warning in Tests]**:
+  Running the test suite showed `ResourceWarning: unclosed database in <sqlite3.Connection>` coming from legacy `src/core/storage.py` (used by `test_report_storage_lifecycle`). Wrapping `self._get_connection()` with `contextlib.closing` in `src/core/storage.py` (just like you did in `src/core/repository.py`) will make test runs 100% warning-free.
+
+---
+
+## 5. Summary Priority Matrix (Phases 1–3)
+
+| Priority | Phase | Component | Issue | Recommended Fix |
+| :--- | :--- | :--- | :--- | :--- |
+| **P1** | Phase 3 | `src/api/app.py` / `src/pipeline/orchestrator.py` | `save(report)` overwrites initial `"queued"` stage in `stage_history` and `created_at`, causing SSE `sent_count` off-by-one skip on the final `"completed"` stage event | Preserve `created_at` and initial `"queued"` stage in `stage_history` when saving completed report |
+| **P1** | Phase 2 | `src/pipeline/grounding.py` | `source_id` fallback (`SRC-1`) can accidentally validate a hallucinated `source_url` if the LLM guesses `"SRC-1"` | Only fall back to `get_by_id(opp.source_id)` when `opp.source_url` is blank or shares the same domain as the `SRC-N` record |
+| **P1** | Phase 2 | `src/core/agent.py` | `self.history` persists on `BaseAgent` instance across multiple `run()` calls | Reset `self.history` per `run()` call (or default `reset_history: bool = True`) |
+| **P1** | Phase 1 | `src/pipeline/registry.py` | `register_extract_response()` can create a disconnected `score=0.0` record if `/extract` returns a redirected URL | Map extracted content back to the requested URL record when redirected, and boost `is_extracted` in `list_sources()` |
+| **P2** | Phase 3 | `src/api/app.py` | External `callback_url` POST is inside the main `try` block; webhook failure calls `mark_failed()` on an already-completed report | Isolate `callback_url` POST in its own `try/except` after `report_repository.save(report)` |
+| **P2** | Phase 3 | `src/api/app.py` | SSE `while True:` loop has no max timeout if a worker container is OOM-killed before `mark_failed()` | Add `max_duration_seconds` timeout guard in `stream_report_progress()` |
+| **P2** | Phase 3 | `src/core/dispatcher.py` | `CloudTasksDispatcher` instantiates a new `CloudTasksClient()` on every dispatch and omits OIDC `audience` | Cache `CloudTasksClient` on the instance and set `"audience": self.worker_base_url` |
+| **P2** | Phase 3 | `src/core/repository.py` | `FirestoreReportRepository.list_reports()` uses deprecated positional `.where("owner_uid", "==", ...)` | Use `FieldFilter("owner_uid", "==", owner_uid)` |
+| **P2** | Phase 3 | `.gitignore` | Firebase Emulator debug logs (`firebase-debug.log`, `firestore-debug.log`, `.firebase/`) not in `.gitignore` | Add Firebase Emulator log/cache paths to `.gitignore` |
+| **P2** | Phase 2 | `src/pipeline/orchestrator.py` | `"searching"` and `"extracting"` SSE events fire back-to-back before `/search` runs; no fallback if `synthesizer` fails | Emit `"extracting"` between `/search` and `/extract`; fail fast if 0 specialists succeed; add fallback summary if only synthesizer fails |
+| **P2** | Phase 2 | `src/core/agent.py` | Unchecked `response.candidates[0]` access | Guard against empty `response.candidates` |
+| **P2** | Phase 1 | `src/pipeline/registry.py` | `normalize_url()` keeps `utm_*` and unsorted query params | Strip tracking params and sort query parameters |
+| **P3** | Phase 3 | `src/core/storage.py` | Legacy `ReportStorage` emits `ResourceWarning: unclosed database` in unit tests | Wrap `sqlite3.connect` with `contextlib.closing` |
+| **P3** | Phase 2 | `src/agents/specialists/roster.py` | `STATE_GUIDANCE` only matches exact `"NY"`, `"NJ"`, `"SF"` strings | Normalize full state/city names (`"California"`, `"CA"`, `"New York"`, `"New Jersey"`) |
+| **P3** | Phase 2 | `src/pipeline/orchestrator.py` | `readiness_gaps` from 4 specialists are concatenated without deduplication | Deduplicate overlapping gaps across specialists |

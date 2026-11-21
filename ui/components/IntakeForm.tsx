@@ -2,8 +2,7 @@
 
 import { useState, useId } from "react";
 import { useRouter } from "next/navigation";
-import { WorkflowExecutionResponse, FormSubmissionPayload } from "@/types";
-import ResultsPanel from "./ResultsPanel";
+import { FormSubmissionPayload, ReportAcceptedResponse } from "@/types";
 import { Loader2, ArrowRight } from "lucide-react";
 
 export default function IntakeForm() {
@@ -14,7 +13,6 @@ export default function IntakeForm() {
   const [isAsync, setIsAsync] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [results, setResults] = useState<WorkflowExecutionResponse | null>(null);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -56,12 +54,7 @@ export default function IntakeForm() {
 
     try {
       const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const endpoint =
-        isAsync && callbackUrl
-          ? `${apiBase}/api/v1/webhook/submit?async_mode=true`
-          : `${apiBase}/api/v1/webhook/submit`;
-
-      const res = await fetch(endpoint, {
+      const res = await fetch(`${apiBase}/api/v1/reports`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -72,10 +65,9 @@ export default function IntakeForm() {
         throw new Error(errorData.detail || `Server returned error status ${res.status}`);
       }
 
-      const data: WorkflowExecutionResponse = await res.json();
-      setResults(data);
-      if (data.workflow_id && data.workflow_id !== "pending") {
-        router.push(`/reports/${data.workflow_id}`);
+      const data: ReportAcceptedResponse = await res.json();
+      if (data.report_id) {
+        router.push(`/reports/${data.report_id}`);
       }
     } catch (err: any) {
       setErrorMsg(err.message || "Failed to submit workflow intake.");
@@ -391,8 +383,6 @@ export default function IntakeForm() {
           </button>
         </div>
       </form>
-
-      {results && <ResultsPanel results={results} />}
     </div>
   );
 }

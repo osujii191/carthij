@@ -4,19 +4,24 @@ import { useEffect, useState, use } from "react";
 import Link from "next/link";
 import Header from "@/components/Header";
 import ResultsPanel from "@/components/ResultsPanel";
-import { ReportRecord } from "@/types";
+import { FundingReport, StageName, StageProgress } from "@/types";
 import {
   ArrowLeft,
   Clock,
   CheckCircle2,
   AlertCircle,
-  Copy,
   Check,
-  Bot,
-  Layers,
-  Network,
   Share2,
+  Loader2,
 } from "lucide-react";
+
+const PIPELINE_STEPS: { stage: StageName; label: string; description: string }[] = [
+  { stage: "query_planning", label: "Query Understanding", description: "Normalizing intake & planning searches" },
+  { stage: "searching", label: "Parallel Web Search", description: "Querying Tavily across jurisdictions" },
+  { stage: "extracting", label: "Source Extraction", description: "Reading top authoritative program pages" },
+  { stage: "analyzing_specialists", label: "Specialist Agents", description: "Running 4 opinionated specialists in parallel" },
+  { stage: "verifying_and_synthesizing", label: "Grounding & Synthesis", description: "Verifying citations & compiling report" },
+];
 
 export default function ReportDetailPage({
   params,
@@ -24,44 +29,79 @@ export default function ReportDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const [report, setReport] = useState<ReportRecord | null>(null);
+  const [report, setReport] = useState<FundingReport | null>(null);
+  const [liveStages, setLiveStages] = useState<StageProgress[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isCopied, setIsCopied] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const fetchReport = async () => {
+  const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  const fetchReport = async (): Promise<FundingReport | null> => {
     try {
-      const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       const res = await fetch(`${apiBase}/api/v1/reports/${id}`, { cache: "no-store" });
       if (!res.ok) {
-        if (res.status === 404) {
-          setErrorMsg("Assessment report not found.");
-        } else {
-          setErrorMsg(`Server error ${res.status}`);
-        }
-        return;
+        setErrorMsg(res.status === 404 ? "Assessment report not found." : `Server error ${res.status}`);
+        return null;
       }
-      const data: ReportRecord = await res.json();
+      const data: FundingReport = await res.json();
       setReport(data);
+      if (data.stage_history?.length) {
+        setLiveStages(data.stage_history);
+      }
+      return data;
     } catch (err: any) {
       setErrorMsg(err.message || "Failed to load report.");
+      return null;
     } finally {
       setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchReport();
+    let eventSource: EventSource | null = null;
+    let cancelled = false;
 
-    // If report is in_progress, poll every 3 seconds
-    const interval = setInterval(() => {
-      if (!report || report.status === "in_progress") {
-        fetchReport();
+    const init = async () => {
+      const data = await fetchReport();
+      if (cancelled || !data) return;
+
+      if (data.status === "queued" || data.status === "in_progress") {
+        eventSource = new EventSource(`${apiBase}/api/v1/reports/${id}/stream`);
+
+        eventSource.addEventListener("stage", (evt) => {
+          try {
+            const parsed: StageProgress = JSON.parse((evt as MessageEvent).data);
+            setLiveStages((prev) => {
+              const exists = prev.some(
+                (s) => s.stage === parsed.stage && s.timestamp === parsed.timestamp
+              );
+              return exists ? prev : [...prev, parsed];
+            });
+          } catch {
+            // ignore malformed event
+          }
+        });
+
+        eventSource.addEventListener("complete", () => {
+          eventSource?.close();
+          fetchReport();
+        });
+
+        eventSource.addEventListener("error", () => {
+          eventSource?.close();
+          fetchReport();
+        });
       }
-    }, 3000);
+    };
 
-    return () => clearInterval(interval);
-  }, [id, report?.status]);
+    init();
+
+    return () => {
+      cancelled = true;
+      eventSource?.close();
+    };
+  }, [id]);
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(window.location.href);
@@ -103,7 +143,12 @@ export default function ReportDetailPage({
     );
   }
 
-  const isInProgress = report.status === "in_progress";
+  const isRunning = report.status === "queued" || report.status === "in_progress";
+  const isFailed = report.status === "failed";
+  const fundingType = String(report.intake_data?.target_funding_instrument || "Funding Intake");
+  const fundingAmount = String(report.intake_data?.target_amount_usd || "—");
+  const seenStages = new Set(liveStages.map((s) => s.stage));
+  const latestStage = liveStages[liveStages.length - 1];
   const formattedDate = new Date(report.created_at * 1000).toLocaleString(undefined, {
     month: "long",
     day: "numeric",
@@ -116,7 +161,6 @@ export default function ReportDetailPage({
     <>
       <Header />
       <main className="flex-1 max-w-5xl mx-auto px-4 py-8 md:py-12 w-full">
-        {/* Navigation & Actions */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
           <Link
             href="/reports"
@@ -148,7 +192,7 @@ export default function ReportDetailPage({
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 md:p-8 mb-8">
           <div className="flex flex-wrap items-center justify-between gap-4 pb-6 border-b border-slate-100">
             <div>
-              <div className="flex items-center gap-3 mb-2">
+              <div className="flex flex-wrap items-center gap-3 mb-2">
                 <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">
                   {report.org_name}
                 </h1>
@@ -162,16 +206,21 @@ export default function ReportDetailPage({
                 )}
               </div>
               <p className="text-sm text-slate-500">
-                Targeting <span className="font-semibold text-slate-800">{report.funding_type}</span> of{" "}
-                <span className="font-bold text-slate-900">${report.funding_amount}</span>
+                Targeting <span className="font-semibold text-slate-800">{fundingType}</span> of{" "}
+                <span className="font-bold text-slate-900">${fundingAmount}</span>
               </p>
             </div>
 
             <div className="flex items-center gap-2">
-              {isInProgress ? (
+              {isRunning ? (
                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-xs font-semibold animate-pulse">
-                  <Clock className="w-4 h-4 animate-spin text-amber-600" />
-                  <span>AI Agents Analyzing Intake</span>
+                  <Loader2 className="w-4 h-4 animate-spin text-amber-600" />
+                  <span>Live Analysis Running</span>
+                </div>
+              ) : isFailed ? (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200 text-xs font-semibold">
+                  <AlertCircle className="w-4 h-4 text-rose-600" />
+                  <span>Assessment Failed</span>
                 </div>
               ) : (
                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold">
@@ -183,63 +232,73 @@ export default function ReportDetailPage({
           </div>
 
           <div className="pt-4 flex flex-wrap items-center justify-between text-xs text-slate-400 gap-2">
-            <span>Report ID: <code className="font-mono text-slate-600">{report.id}</code></span>
+            <span>
+              Report ID: <code className="font-mono text-slate-600">{report.report_id}</code>
+            </span>
             <span>Submitted on {formattedDate}</span>
           </div>
         </div>
 
-        {/* In-Progress Live Status Card */}
-        {isInProgress ? (
-          <div className="bg-white rounded-2xl border border-amber-200 shadow-md p-8 md:p-12 text-center">
-            <div className="w-16 h-16 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto mb-6 shadow-inner">
-              <Clock className="w-8 h-8 animate-spin" />
+        {/* Live SSE Progress View vs. Failed vs. Completed Canonical Report */}
+        {isRunning ? (
+          <div className="bg-white rounded-2xl border border-amber-200 shadow-md p-8 md:p-10">
+            <div className="text-center mb-8">
+              <div className="w-14 h-14 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto mb-4">
+                <Loader2 className="w-7 h-7 animate-spin" />
+              </div>
+              <h2 className="text-2xl font-bold text-slate-900 mb-1">
+                Multi-Agent Pipeline Running
+              </h2>
+              <p className="text-slate-600 text-sm">
+                {latestStage?.message || "Streaming live progress from the backend..."}
+              </p>
             </div>
-            <h2 className="text-2xl font-bold text-slate-900 mb-2">
-              Multi-Agent Analysis in Progress
-            </h2>
-            <p className="text-slate-600 max-w-md mx-auto text-sm mb-8">
-              The Gemini Coordinator is decomposing your intake and running parallel subagents to evaluate
-              market readiness, compliance, and risk factors. This page automatically updates when ready.
-            </p>
 
-            {/* Step Indicators */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-2xl mx-auto text-left">
-              <div className="p-4 rounded-xl border border-emerald-200 bg-emerald-50/50 flex items-start gap-3">
-                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-                <div>
-                  <h3 className="text-xs font-bold text-emerald-900">1. Intake Received</h3>
-                  <p className="text-xs text-emerald-700 mt-0.5">Pitch &amp; targets validated.</p>
-                </div>
-              </div>
+            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+              {PIPELINE_STEPS.map((step, index) => {
+                const isCurrent = latestStage?.stage === step.stage;
+                const isDone =
+                  seenStages.has(step.stage) &&
+                  !isCurrent &&
+                  PIPELINE_STEPS.findIndex((s) => s.stage === latestStage?.stage) > index;
 
-              <div className="p-4 rounded-xl border border-amber-300 bg-amber-50/80 flex items-start gap-3 animate-pulse">
-                <Network className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                <div>
-                  <h3 className="text-xs font-bold text-amber-900">2. Parallel Subagents</h3>
-                  <p className="text-xs text-amber-700 mt-0.5">Evaluating market &amp; risks.</p>
-                </div>
-              </div>
-
-              <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 flex items-start gap-3 opacity-60">
-                <Layers className="w-5 h-5 text-slate-400 shrink-0 mt-0.5" />
-                <div>
-                  <h3 className="text-xs font-bold text-slate-700">3. Final Synthesis</h3>
-                  <p className="text-xs text-slate-500 mt-0.5">Compiling readiness report.</p>
-                </div>
-              </div>
+                return (
+                  <div
+                    key={step.stage}
+                    className={`p-4 rounded-xl border transition-all ${
+                      isDone
+                        ? "border-emerald-200 bg-emerald-50/50"
+                        : isCurrent
+                        ? "border-amber-300 bg-amber-50/80 animate-pulse"
+                        : "border-slate-200 bg-slate-50 opacity-60"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      {isDone ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      ) : isCurrent ? (
+                        <Loader2 className="w-4 h-4 text-amber-600 animate-spin shrink-0" />
+                      ) : (
+                        <Clock className="w-4 h-4 text-slate-400 shrink-0" />
+                      )}
+                      <h3 className="text-xs font-bold text-slate-900">{step.label}</h3>
+                    </div>
+                    <p className="text-[11px] text-slate-600 leading-snug">{step.description}</p>
+                  </div>
+                );
+              })}
             </div>
           </div>
+        ) : isFailed ? (
+          <div className="bg-white rounded-2xl border border-rose-200 shadow-sm p-8 text-center">
+            <AlertCircle className="w-10 h-10 text-rose-500 mx-auto mb-3" />
+            <h2 className="text-xl font-bold text-slate-900 mb-2">Pipeline Execution Failed</h2>
+            <p className="text-sm text-rose-700 max-w-xl mx-auto">
+              {report.executive_summary || "An unexpected error occurred during analysis."}
+            </p>
+          </div>
         ) : (
-          /* Completed Report Panel */
-          <ResultsPanel
-            results={{
-              workflow_id: report.id,
-              status: report.status,
-              summary: report.summary || "No summary available.",
-              subagent_results: report.subagent_results as any,
-              metadata: report.metadata,
-            }}
-          />
+          <ResultsPanel report={report} />
         )}
       </main>
     </>

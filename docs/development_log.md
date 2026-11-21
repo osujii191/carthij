@@ -65,3 +65,17 @@ High-level chronological log of completed architecture and implementation phases
   - Kept `POST /api/v1/webhook/submit` as a backwards-compatible wrapper backed by `ReportRepository`.
   - Documented Firebase/Firestore & Cloud Tasks env vars in `.env.example` and added `[project.optional-dependencies] gcp` in `pyproject.toml`.
 - **Verification**: All 18 unit tests pass (`uv run python -m unittest discover -s tests -v`).
+
+---
+
+## 2026-11-21 — Phase 4: Cloud Run, Firebase App Hosting & Structured UI Upgrade (Completed)
+
+- **Cloud Run & Firebase App Hosting Deployment Configs** (`Dockerfile`, `.dockerignore`, `ui/apphosting.yaml`, `firebase.json`):
+  - Added production `Dockerfile` for Cloud Run (`python:3.12-slim` + `uv`, installs `.[gcp]` extras, runs non-root `uvicorn` on `$PORT`) and `.dockerignore`.
+  - Added `ui/apphosting.yaml` and wired the `apphosting` block (`backendId: "carthij-ui"`, `rootDir: "ui"`) into `firebase.json`.
+- **Canonical `FundingReport` & Live SSE UI Upgrade** (`ui/types/index.ts`, `ui/components/IntakeForm.tsx`, `ui/components/ResultsPanel.tsx`, `ui/app/reports/page.tsx`, `ui/app/reports/[id]/page.tsx`):
+  - Updated TypeScript contracts to match the canonical `FundingReport` schema.
+  - Switched `IntakeForm` to `POST /api/v1/reports` (`202 Accepted`) and immediate redirect to `/reports/{report_id}`.
+  - Upgraded `/reports/[id]` to subscribe to live Server-Sent Events (`GET /api/v1/reports/{id}/stream`) with a 5-stage real-time progress indicator.
+  - Upgraded `ResultsPanel` to display Readiness Score (`0–100`), scope-filterable Verified Funding Opportunities with `[SRC-N]` citations, Readiness Gaps by severity, Prioritized 7d/30d/90d Action Plan, Specialist Summaries, and the Verified Source Registry.
+- **Verification**: Backend unit tests (18/18) and Next.js production build (`npm run build`) verified cleanly.

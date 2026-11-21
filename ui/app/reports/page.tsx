@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import Header from "@/components/Header";
-import { ReportRecord } from "@/types";
+import { FundingReport } from "@/types";
 import {
   FileText,
   Clock,
@@ -13,10 +13,11 @@ import {
   PlusCircle,
   RefreshCw,
   Search,
+  Award,
 } from "lucide-react";
 
 export default function ReportsDashboard() {
-  const [reports, setReports] = useState<ReportRecord[]>([]);
+  const [reports, setReports] = useState<FundingReport[]>([]);
   const [filter, setFilter] = useState<"all" | "in_progress" | "completed">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -28,7 +29,7 @@ export default function ReportsDashboard() {
       const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       const res = await fetch(`${apiBase}/api/v1/reports`, { cache: "no-store" });
       if (res.ok) {
-        const data: ReportRecord[] = await res.json();
+        const data: FundingReport[] = await res.json();
         setReports(data);
       }
     } catch (err) {
@@ -41,39 +42,43 @@ export default function ReportsDashboard() {
 
   useEffect(() => {
     fetchReports();
-
-    // Auto-poll every 4 seconds if there are any reports in_progress
     const interval = setInterval(() => {
       fetchReports();
     }, 4000);
-
     return () => clearInterval(interval);
   }, []);
 
+  const isRunning = (status: FundingReport["status"]) =>
+    status === "queued" || status === "in_progress";
+
   const filteredReports = reports.filter((r) => {
     const matchesFilter =
-      filter === "all" ? true : filter === "in_progress" ? r.status === "in_progress" : r.status === "completed";
+      filter === "all"
+        ? true
+        : filter === "in_progress"
+        ? isRunning(r.status)
+        : r.status === "completed";
+    const fundingType = String(r.intake_data?.target_funding_instrument || "");
     const matchesSearch =
       r.org_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      r.funding_type.toLowerCase().includes(searchQuery.toLowerCase());
+      fundingType.toLowerCase().includes(searchQuery.toLowerCase());
     return matchesFilter && matchesSearch;
   });
 
-  const inProgressCount = reports.filter((r) => r.status === "in_progress").length;
+  const inProgressCount = reports.filter((r) => isRunning(r.status)).length;
   const completedCount = reports.filter((r) => r.status === "completed").length;
 
   return (
     <>
       <Header />
       <main className="flex-1 max-w-6xl mx-auto px-4 py-8 md:py-12 w-full">
-        {/* Title & Stats */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
           <div>
             <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">
               Assessment Reports Dashboard
             </h1>
             <p className="text-slate-500 text-sm mt-1">
-              Track active multi-agent analyses and view completed readiness reports.
+              Track active multi-agent analyses and review grounded readiness reports.
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -96,15 +101,12 @@ export default function ReportsDashboard() {
           </div>
         </div>
 
-        {/* Filters & Search */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 mb-6">
           <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl text-xs font-semibold">
             <button
               onClick={() => setFilter("all")}
               className={`px-3 py-1.5 rounded-lg transition-all ${
-                filter === "all"
-                  ? "bg-white text-slate-900 shadow-sm"
-                  : "text-slate-600 hover:text-slate-900"
+                filter === "all" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900"
               }`}
             >
               All Reports ({reports.length})
@@ -144,7 +146,6 @@ export default function ReportsDashboard() {
           </div>
         </div>
 
-        {/* Report List */}
         {isLoading ? (
           <div className="p-16 text-center bg-white rounded-2xl border border-slate-200 shadow-sm">
             <RefreshCw className="w-8 h-8 animate-spin text-blue-600 mx-auto mb-3" />
@@ -172,8 +173,10 @@ export default function ReportsDashboard() {
         ) : (
           <div className="grid grid-cols-1 gap-4">
             {filteredReports.map((report) => {
-              const isInProgress = report.status === "in_progress";
-              const isCompleted = report.status === "completed";
+              const running = isRunning(report.status);
+              const completed = report.status === "completed";
+              const fundingType = String(report.intake_data?.target_funding_instrument || "Funding Intake");
+              const fundingAmount = String(report.intake_data?.target_amount_usd || "—");
               const formattedDate = new Date(report.created_at * 1000).toLocaleString(undefined, {
                 month: "short",
                 day: "numeric",
@@ -184,23 +187,23 @@ export default function ReportsDashboard() {
 
               return (
                 <Link
-                  key={report.id}
-                  href={`/reports/${report.id}`}
+                  key={report.report_id}
+                  href={`/reports/${report.report_id}`}
                   className="group bg-white p-5 md:p-6 rounded-2xl border border-slate-200 hover:border-blue-400 hover:shadow-md transition-all flex flex-col md:flex-row md:items-center justify-between gap-4"
                 >
                   <div className="flex items-start gap-4">
                     <div
                       className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${
-                        isInProgress
+                        running
                           ? "bg-amber-50 text-amber-600 border border-amber-200"
-                          : isCompleted
+                          : completed
                           ? "bg-emerald-50 text-emerald-600 border border-emerald-200"
                           : "bg-rose-50 text-rose-600 border border-rose-200"
                       }`}
                     >
-                      {isInProgress ? (
+                      {running ? (
                         <Clock className="w-5 h-5 animate-spin" />
-                      ) : isCompleted ? (
+                      ) : completed ? (
                         <CheckCircle2 className="w-5 h-5" />
                       ) : (
                         <AlertCircle className="w-5 h-5" />
@@ -219,12 +222,12 @@ export default function ReportsDashboard() {
                             {report.target_state}
                           </span>
                         )}
-                        {isInProgress ? (
+                        {running ? (
                           <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 animate-pulse">
                             <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
                             Agents In Progress
                           </span>
-                        ) : isCompleted ? (
+                        ) : completed ? (
                           <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
                             Ready
                           </span>
@@ -233,17 +236,28 @@ export default function ReportsDashboard() {
                             Failed
                           </span>
                         )}
+                        {completed && report.readiness_score != null && (
+                          <span className="inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-slate-900 text-white">
+                            <Award className="w-3 h-3" />
+                            {report.readiness_score}/100
+                          </span>
+                        )}
                       </div>
                       <p className="text-sm text-slate-600">
-                        <span className="font-medium text-slate-700">{report.funding_type}</span> &middot;{" "}
-                        <span className="font-semibold text-slate-900">${report.funding_amount}</span>
+                        <span className="font-medium text-slate-700">{fundingType}</span> &middot;{" "}
+                        <span className="font-semibold text-slate-900">${fundingAmount}</span>
+                        {completed && (
+                          <span className="text-xs text-slate-500 ml-2">
+                            ({report.opportunities.length} verified opportunities)
+                          </span>
+                        )}
                       </p>
                       <p className="text-xs text-slate-400 mt-1">Submitted on {formattedDate}</p>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-2 text-sm font-semibold text-blue-600 group-hover:translate-x-1 transition-transform self-end md:self-center">
-                    <span>{isInProgress ? "View Live Progress" : "Read Full Report"}</span>
+                    <span>{running ? "View Live Progress" : "Read Full Report"}</span>
                     <ArrowRight className="w-4 h-4" />
                   </div>
                 </Link>
