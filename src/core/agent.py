@@ -75,9 +75,16 @@ class BaseAgent:
 
         return types.GenerateContentConfig(**config_kwargs)
 
-    async def run(self, prompt: str, *, reset_history: bool = True) -> str:
+    async def run(
+        self,
+        prompt: str,
+        *,
+        reset_history: bool = True,
+        extra_parts: Optional[List[types.Part]] = None,
+    ) -> str:
         """
         Executes an agent turn with native async function calling loop.
+        Supports native multimodal inputs (PDFs, JPEG/PNG screenshots) via `extra_parts`.
         Resets `self.history` by default on each call so reused agent instances never leak
         prior request context across runs.
         When both `tools` and `response_schema` are configured, runs two-phase execution:
@@ -88,11 +95,15 @@ class BaseAgent:
         if reset_history:
             self.history = []
 
+        user_parts: List[types.Part] = [types.Part.from_text(text=prompt)]
+        if extra_parts:
+            user_parts.extend(extra_parts)
+
         # Append user message to history
         self.history.append(
             types.Content(
                 role="user",
-                parts=[types.Part.from_text(text=prompt)],
+                parts=user_parts,
             )
         )
 

@@ -1,3 +1,4 @@
+import inspect
 import logging
 import re
 import time
@@ -258,14 +259,20 @@ class BrowserDraftOrchestrator:
                     final_status = "ready_for_review"
                     break
 
-                # Stage 2: Map verified ApplicantFactLedger onto extracted DOM fields
-                fill_plan = await self.mapper.plan_fill(
-                    form_schema=schema,
-                    fact_ledger=fact_ledger,
-                    opportunity_name=opportunity_name,
-                    opportunity_source_url=opportunity_source_url,
-                    opportunity_context=opportunity_context,
-                )
+                # Stage 2: Multimodal Vision + DOM mapping onto extracted form fields
+                plan_kwargs: dict = {
+                    "form_schema": schema,
+                    "fact_ledger": fact_ledger,
+                    "opportunity_name": opportunity_name,
+                    "opportunity_source_url": opportunity_source_url,
+                    "opportunity_context": opportunity_context,
+                }
+                sig = inspect.signature(self.mapper.plan_fill)
+                if "screenshot_b64" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                ):
+                    plan_kwargs["screenshot_b64"] = latest_screenshot
+                fill_plan = await self.mapper.plan_fill(**plan_kwargs)
                 if fill_plan.narrative_summary_markdown.strip():
                     narrative_chunks.append(fill_plan.narrative_summary_markdown.strip())
 

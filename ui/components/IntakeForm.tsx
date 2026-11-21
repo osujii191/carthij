@@ -3,16 +3,79 @@
 import { useState, useId } from "react";
 import { useRouter } from "next/navigation";
 import { FormSubmissionPayload, ReportAcceptedResponse } from "@/types";
-import { Loader2, ArrowRight } from "lucide-react";
+import { Loader2, ArrowRight, FileUp, Sparkles, CheckCircle2 } from "lucide-react";
 
 export default function IntakeForm() {
   const router = useRouter();
   const formHeadingId = useId();
   const [orgType, setOrgType] = useState<"Startup" | "Non-Profit">("Startup");
   const [targetState, setTargetState] = useState<"NY" | "NJ" | "SF">("NY");
+  const [orgName, setOrgName] = useState("");
+  const [contactEmail, setContactEmail] = useState("");
+  const [mission, setMission] = useState("");
+  const [fundingType, setFundingType] = useState("Equity Investment (Pre-Seed / SAFE / Angel)");
+  const [fundingAmount, setFundingAmount] = useState("");
+  const [useOfFunds, setUseOfFunds] = useState("");
+  const [extractedFacts, setExtractedFacts] = useState<Record<string, string>>({});
+  const [isExtractingPdf, setIsExtractingPdf] = useState(false);
+  const [pdfNotice, setPdfNotice] = useState<string | null>(null);
   const [isAsync, setIsAsync] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setErrorMsg(null);
+    setPdfNotice(null);
+    setIsExtractingPdf(true);
+
+    try {
+      const base64DataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("Could not read PDF file."));
+        reader.readAsDataURL(file);
+      });
+
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const res = await fetch(`${apiBase}/api/v1/intake/extract-pdf`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: file.name, pdf_base64: base64DataUrl }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `PDF extraction failed (${res.status})`);
+      }
+
+      const profile = await res.json();
+      if (profile.organization_type === "Startup" || profile.organization_type === "Non-Profit") {
+        setOrgType(profile.organization_type);
+      }
+      if (profile.target_state === "NY" || profile.target_state === "NJ" || profile.target_state === "SF") {
+        setTargetState(profile.target_state);
+      }
+      if (profile.organization_name) setOrgName(profile.organization_name);
+      if (profile.contact_email) setContactEmail(profile.contact_email);
+      if (profile.mission_and_pitch) setMission(profile.mission_and_pitch);
+      if (profile.target_funding_instrument) setFundingType(profile.target_funding_instrument);
+      if (profile.target_amount_usd) setFundingAmount(profile.target_amount_usd);
+      if (profile.use_of_funds) setUseOfFunds(profile.use_of_funds);
+      if (profile.verified_extra_facts && typeof profile.verified_extra_facts === "object") {
+        setExtractedFacts(profile.verified_extra_facts);
+      }
+      setPdfNotice(
+        profile.source_summary || `Auto-filled intake from ${file.name} via Gemini 3.8 Flash.`
+      );
+    } catch (err: any) {
+      setErrorMsg(err.message || "Failed to extract intake from PDF.");
+    } finally {
+      setIsExtractingPdf(false);
+      e.target.value = "";
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -26,18 +89,13 @@ export default function IntakeForm() {
     }
 
     const formData = new FormData(form);
-    const orgName = (formData.get("org_name") as string) || "";
-    const contactEmail = (formData.get("contact_email") as string) || "";
-    const mission = (formData.get("mission") as string) || "";
-    const fundingType = (formData.get("funding_type") as string) || "";
-    const fundingAmount = (formData.get("funding_amount") as string) || "";
-    const useOfFunds = (formData.get("use_of_funds") as string) || "";
     const callbackUrl = (formData.get("callback_url") as string) || null;
 
     const payload: FormSubmissionPayload = {
       form_id: `intake_${orgType.toLowerCase()}_${targetState.toLowerCase()}`,
       submitter_email: contactEmail,
       data: {
+        ...extractedFacts,
         organization_name: orgName,
         organization_type: orgType,
         target_state: targetState,
@@ -93,6 +151,50 @@ export default function IntakeForm() {
         aria-labelledby={formHeadingId}
         noValidate
       >
+        {/* Native Multimodal PDF Pitch Deck Auto-Fill */}
+        <div className="p-4 rounded-xl bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 rounded-lg bg-blue-600 text-white flex items-center justify-center shrink-0 mt-0.5">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-slate-900">
+                Auto-Fill from Pitch Deck or Org PDF (Gemini 3.8 Flash Multimodal)
+              </p>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Upload a startup pitch deck, 501(c)(3) overview, or 10-K PDF to populate fields &amp; verified facts natively.
+              </p>
+              {pdfNotice && (
+                <p className="text-xs font-semibold text-emerald-700 mt-1.5 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>{pdfNotice}</span>
+                </p>
+              )}
+            </div>
+          </div>
+
+          <label className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-blue-700 text-white text-xs font-bold cursor-pointer transition-colors shadow-sm shrink-0">
+            {isExtractingPdf ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Reading PDF...</span>
+              </>
+            ) : (
+              <>
+                <FileUp className="w-4 h-4" />
+                <span>Upload PDF</span>
+              </>
+            )}
+            <input
+              type="file"
+              accept="application/pdf,.pdf"
+              onChange={handlePdfUpload}
+              disabled={isExtractingPdf}
+              className="hidden"
+            />
+          </label>
+        </div>
+
         {/* Organization Type Radios */}
         <fieldset className="space-y-3">
           <legend className="text-sm font-semibold text-slate-800">
@@ -225,6 +327,8 @@ export default function IntakeForm() {
               id="org-name"
               name="org_name"
               required
+              value={orgName}
+              onChange={(e) => setOrgName(e.target.value)}
               autoComplete="organization"
               enterKeyHint="next"
               placeholder="e.g. Acme Health or CleanWater Global"
@@ -241,6 +345,8 @@ export default function IntakeForm() {
               id="contact-email"
               name="contact_email"
               required
+              value={contactEmail}
+              onChange={(e) => setContactEmail(e.target.value)}
               autoComplete="email"
               enterKeyHint="next"
               placeholder="founder@organization.org"
@@ -260,6 +366,8 @@ export default function IntakeForm() {
             rows={3}
             required
             maxLength={1000}
+            value={mission}
+            onChange={(e) => setMission(e.target.value)}
             placeholder="What core problem do you solve, what is your approach, and who benefits?"
             className="border border-slate-300 rounded-lg p-3 text-base focus:ring-2 focus:ring-blue-500 focus:outline-none"
           />
@@ -279,6 +387,8 @@ export default function IntakeForm() {
                 id="funding-type"
                 name="funding_type"
                 required
+                value={fundingType}
+                onChange={(e) => setFundingType(e.target.value)}
                 className="border border-slate-300 rounded-lg p-3 text-base min-h-[48px] focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white"
               >
                 <option value="Equity Investment (Pre-Seed / SAFE / Angel)">Equity Investment (Pre-Seed / SAFE / Angel)</option>
@@ -299,6 +409,8 @@ export default function IntakeForm() {
                 id="funding-amount"
                 name="funding_amount"
                 required
+                value={fundingAmount}
+                onChange={(e) => setFundingAmount(e.target.value)}
                 inputMode="numeric"
                 placeholder="e.g. 500,000"
                 className="border border-slate-300 rounded-lg p-3 text-base min-h-[48px] focus:ring-2 focus:ring-blue-500 focus:outline-none"
@@ -315,6 +427,8 @@ export default function IntakeForm() {
               id="use-of-funds"
               name="use_of_funds"
               required
+              value={useOfFunds}
+              onChange={(e) => setUseOfFunds(e.target.value)}
               enterKeyHint="done"
               placeholder="e.g. 50% Engineering/Product, 30% Go-to-Market, 20% Operations"
               className="border border-slate-300 rounded-lg p-3 text-base min-h-[48px] focus:ring-2 focus:ring-blue-500 focus:outline-none"

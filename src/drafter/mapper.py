@@ -1,5 +1,7 @@
+import base64
 import json
 from typing import Any, Dict, List, Literal, Optional
+from google.genai import types
 from pydantic import BaseModel, Field
 
 from src.core.agent import BaseAgent
@@ -93,15 +95,32 @@ class FormMapperAgent:
         opportunity_name: str,
         opportunity_source_url: str,
         opportunity_context: Optional[FundingOpportunity] = None,
+        screenshot_b64: Optional[str] = None,
     ) -> FormFillPlan:
+        extra_parts: List[types.Part] = []
+        if screenshot_b64 and screenshot_b64.startswith(("data:image/jpeg;base64,", "data:image/png;base64,")):
+            header, b64_data = screenshot_b64.split(",", 1)
+            mime_type = "image/jpeg" if "jpeg" in header else "image/png"
+            try:
+                img_bytes = base64.b64decode(b64_data)
+                extra_parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
+            except Exception:
+                pass
+
+        vision_note = (
+            "\nA live viewport screenshot of the portal page is attached alongside the DOM schema. "
+            "Use both visual cues (layout, required badges, helper text, banners) and DOM attributes."
+            if extra_parts
+            else ""
+        )
         prompt = (
             f"Target Funding Opportunity: {opportunity_name} ({opportunity_source_url})\n"
             f"Opportunity Context:\n"
             f"{opportunity_context.model_dump_json(indent=2) if opportunity_context else 'N/A'}\n\n"
             f"ApplicantFactLedger (ONLY verified facts allowed):\n"
             f"{json.dumps(fact_ledger, indent=2)}\n\n"
-            f"Live ExtractedFormSchema (map every field):\n"
+            f"Live ExtractedFormSchema (map every field):{vision_note}\n"
             f"{form_schema.model_dump_json(indent=2)}"
         )
-        raw_json = await self.agent.run(prompt)
+        raw_json = await self.agent.run(prompt, extra_parts=extra_parts or None)
         return FormFillPlan.model_validate_json(raw_json)

@@ -21,6 +21,12 @@ from pydantic import BaseModel
 import uvicorn
 
 from src.agents.coordinator import CoordinatorAgent
+from src.agents.pdf_extractor import (
+    ExtractedIntakeProfile,
+    PDFExtractRequest,
+    PDFIntakeExtractor,
+    decode_pdf_base64,
+)
 from src.agents.planner import QueryExecutionReport, QueryPlan, QueryPlanner
 from src.api.schemas import FormSubmissionRequest, SubagentResult, WorkflowExecutionResponse
 from src.core.dispatcher import JobDispatcher, JobPayload, get_job_dispatcher
@@ -126,6 +132,29 @@ job_dispatcher: JobDispatcher = get_job_dispatcher(execute_report_job)
 @app.get("/api/v1/health")
 async def health_check():
     return {"status": "healthy", "service": "carthij-agent-workflow"}
+
+
+@app.post(
+    "/api/v1/intake/extract-pdf",
+    response_model=ExtractedIntakeProfile,
+    summary="Native multimodal Gemini 3.8 Flash PDF pitch deck / document intake extractor",
+)
+async def extract_intake_from_pdf(req: PDFExtractRequest):
+    """
+    Passes raw PDF bytes natively to Gemini 3.8 Flash to auto-populate the funding intake form
+    and enrich ApplicantFactLedger with verified document facts.
+    """
+    try:
+        pdf_bytes = decode_pdf_base64(req.pdf_base64)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        extractor = PDFIntakeExtractor()
+        return await extractor.extract_from_bytes(pdf_bytes, filename=req.filename)
+    except Exception as exc:
+        logger.exception("Multimodal PDF intake extraction failed")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 if os.getenv("CARTHIJ_DEV_TOOLS", "").lower() in ("true", "1", "yes"):

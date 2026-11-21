@@ -42,6 +42,7 @@ const safeHref = (url: string): string => {
 export default function ResultsPanel({ report }: ResultsPanelProps) {
   const router = useRouter();
   const [scopeFilter, setScopeFilter] = useState<string>("all");
+  const [customPortalUrl, setCustomPortalUrl] = useState<string>("");
   const [draftingOpp, setDraftingOpp] = useState<string | null>(null);
   const [draftError, setDraftError] = useState<string | null>(null);
 
@@ -50,13 +51,17 @@ export default function ResultsPanel({ report }: ResultsPanelProps) {
     setDraftingOpp(opp.name);
     try {
       const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const bodyPayload: Record<string, any> = {
+        opportunity_name: opp.name,
+        opportunity_source_url: opp.source_url,
+      };
+      if (customPortalUrl.trim()) {
+        bodyPayload.target_portal_url = customPortalUrl.trim();
+      }
       const res = await fetch(`${apiBase}/api/v1/reports/${report.report_id}/drafts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          opportunity_name: opp.name,
-          opportunity_source_url: opp.source_url,
-        }),
+        body: JSON.stringify(bodyPayload),
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -151,6 +156,21 @@ export default function ResultsPanel({ report }: ResultsPanelProps) {
               </button>
             ))}
           </div>
+        </div>
+
+        {/* Optional Custom Portal URL for live external form demos */}
+        <div className="mb-5 p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center gap-3">
+          <label htmlFor="custom-portal-url" className="text-xs font-semibold text-slate-700 shrink-0">
+            Browser-Use Target Portal (optional):
+          </label>
+          <input
+            id="custom-portal-url"
+            type="url"
+            value={customPortalUrl}
+            onChange={(e) => setCustomPortalUrl(e.target.value)}
+            placeholder="Leave blank for built-in Demo Grant Portal, or paste any public form URL (https://...)"
+            className="flex-1 border border-slate-300 rounded-lg px-3 py-1.5 text-xs bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+          />
         </div>
 
         {draftError && (

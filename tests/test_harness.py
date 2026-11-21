@@ -909,6 +909,7 @@ class TestAgentHarness(unittest.TestCase):
                 opportunity_name,
                 opportunity_source_url,
                 opportunity_context=None,
+                screenshot_b64=None,
             ):
                 actions = []
                 for field in form_schema.fields:
@@ -1143,6 +1144,28 @@ class TestAgentHarness(unittest.TestCase):
             api_app.draft_repository = orig_draft_repo
             if os.path.exists(temp_db):
                 os.remove(temp_db)
+
+    def test_multimodal_pdf_base64_validation_and_endpoint(self):
+        import base64
+        from fastapi.testclient import TestClient
+        import src.api.app as api_app
+        from src.agents.pdf_extractor import decode_pdf_base64
+
+        valid_pdf = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF"
+        b64_uri = "data:application/pdf;base64," + base64.b64encode(valid_pdf).decode("ascii")
+        self.assertEqual(decode_pdf_base64(b64_uri), valid_pdf)
+
+        # Non-PDF bytes must be rejected
+        not_pdf = base64.b64encode(b"hello world").decode("ascii")
+        with self.assertRaises(ValueError):
+            decode_pdf_base64(not_pdf)
+
+        client = TestClient(api_app.app)
+        bad = client.post(
+            "/api/v1/intake/extract-pdf",
+            json={"filename": "fake.pdf", "pdf_base64": not_pdf},
+        )
+        self.assertEqual(bad.status_code, 400)
 
     def test_report_storage_lifecycle(self):
         import tempfile

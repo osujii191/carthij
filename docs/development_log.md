@@ -149,3 +149,17 @@ Addressed all P1 and high-value P2/P3 findings from [phase_1_2_code_review.md](.
   - Streams live `event: browser_step` screenshots and action logs over SSE (`GET /api/v1/drafts/{draftId}/stream`) with automatic polling fallback.
   - Displays the Human-in-the-Loop pre-Submit safety banner, live browser viewport frame, step-by-step action log, pre-filled fields audit table, drafted narrative copy button, Markdown export button, and interactive **"Re-Fill Portal with My Inputs"** form wired to `POST /api/v1/drafts/{draftId}/revise`.
 - **Verification**: Backend unit tests (`25/25`) and Next.js production build (`npm run build`) verified cleanly.
+
+---
+
+## 2026-11-21 — Multimodal Gemini Sprint: Native PDF Pitch Deck Ingestion, Vision+DOM Browser-Use & Custom Portal URL (Completed)
+
+- **Native Multimodal `BaseAgent`** (`src/core/agent.py`):
+  - Added `extra_parts: Optional[List[types.Part]]` support to `BaseAgent.run()` for native Gemini PDF and image inputs.
+- **Native Multimodal PDF Pitch Deck Extractor** (`src/agents/pdf_extractor.py`, `src/api/app.py`, `ui/components/IntakeForm.tsx`):
+  - Added `PDFIntakeExtractor` + `POST /api/v1/intake/extract-pdf` sending raw PDF bytes natively to **Gemini 3.8 Flash** (`types.Part.from_bytes(mime_type="application/pdf")`) with `%PDF` header & 15 MiB size validation.
+  - Added a **"Upload PDF"** auto-fill banner to `IntakeForm.tsx` that populates all intake fields and verified extra facts in one click.
+- **Vision + DOM Browser-Use & Custom Portal URL** (`src/drafter/mapper.py`, `src/drafter/orchestrator.py`, `ui/components/ResultsPanel.tsx`):
+  - Passed live Playwright JPEG screenshots alongside `ExtractedFormSchema` into `FormMapperAgent` so Gemini 3.8 Flash performs true multimodal Vision + DOM form mapping.
+  - Added an optional **Browser-Use Target Portal URL** input in `ResultsPanel.tsx` so judges can test either `/demo-portal` or any live public form URL on stage.
+- **Pitch Deck & Verification**: Updated `docs/hackathon_pitch.html` to highlight Native PDF Ingestion & Vision+DOM Browser-Use. All backend unit tests and `ui/` `npm run build` pass cleanly.
