@@ -60,7 +60,21 @@ export default function ReportDetailPage({
 
   useEffect(() => {
     let eventSource: EventSource | null = null;
+    let fallbackPoll: ReturnType<typeof setInterval> | null = null;
     let cancelled = false;
+
+    const startFallbackPoll = () => {
+      if (fallbackPoll || cancelled) return;
+      fallbackPoll = setInterval(async () => {
+        const latest = await fetchReport();
+        if (latest && (latest.status === "completed" || latest.status === "failed")) {
+          if (fallbackPoll) {
+            clearInterval(fallbackPoll);
+            fallbackPoll = null;
+          }
+        }
+      }, 4000);
+    };
 
     const init = async () => {
       const data = await fetchReport();
@@ -85,12 +99,26 @@ export default function ReportDetailPage({
 
         eventSource.addEventListener("complete", () => {
           eventSource?.close();
+          if (fallbackPoll) clearInterval(fallbackPoll);
           fetchReport();
         });
 
-        eventSource.addEventListener("error", () => {
+        eventSource.addEventListener("timeout", () => {
           eventSource?.close();
-          fetchReport();
+          startFallbackPoll();
+        });
+
+        eventSource.addEventListener("error", (evt) => {
+          const msgData = (evt as MessageEvent).data;
+          if (msgData) {
+            // Explicit server-sent terminal error event
+            eventSource?.close();
+            if (fallbackPoll) clearInterval(fallbackPoll);
+            fetchReport();
+          } else if (eventSource?.readyState === EventSource.CLOSED) {
+            // Browser gave up reconnecting -> switch seamlessly to polling fallback
+            startFallbackPoll();
+          }
         });
       }
     };
@@ -100,13 +128,18 @@ export default function ReportDetailPage({
     return () => {
       cancelled = true;
       eventSource?.close();
+      if (fallbackPoll) clearInterval(fallbackPoll);
     };
   }, [id]);
 
-  const handleCopyLink = () => {
-    navigator.clipboard.writeText(window.location.href);
-    setIsCopied(true);
-    setTimeout(() => setIsCopied(false), 2000);
+  const handleCopyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+    } catch {
+      // Clipboard API unavailable (non-HTTPS or restricted iframe)
+    }
   };
 
   if (isLoading) {
@@ -146,7 +179,7 @@ export default function ReportDetailPage({
   const isRunning = report.status === "queued" || report.status === "in_progress";
   const isFailed = report.status === "failed";
   const fundingType = String(report.intake_data?.target_funding_instrument || "Funding Intake");
-  const fundingAmount = String(report.intake_data?.target_amount_usd || "—");
+  const fundingAmount = String(report.intake_data?.target_amount_usd || "—").replace(/^\$/, "");
   const seenStages = new Set(liveStages.map((s) => s.stage));
   const latestStage = liveStages[liveStages.length - 1];
   const formattedDate = new Date(report.created_at * 1000).toLocaleString(undefined, {

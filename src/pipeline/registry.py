@@ -1,9 +1,12 @@
 import asyncio
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from src.core.tavily import TavilyExtractResponse, TavilySearchResponse
 from src.models.report import SourceRecord
+
+_TRACKING_PARAM_PREFIXES = ("utm_",)
+_TRACKING_PARAMS = {"fbclid", "gclid", "mc_cid", "mc_eid", "ref"}
 
 # Authoritative domains given a ranking boost when selecting URLs for Tavily /extract
 AUTHORITATIVE_DOMAINS = (
@@ -25,14 +28,25 @@ AUTHORITATIVE_DOMAINS = (
 
 
 def normalize_url(url: str) -> str:
-    """Normalizes URLs for deterministic deduplication and citation verification."""
+    """
+    Normalizes URLs for deterministic deduplication and citation verification:
+    lowercases scheme/host, strips www., strips trailing slashes & fragments,
+    removes tracking parameters (utm_*, fbclid, gclid), and sorts query params.
+    """
     parsed = urlparse(url.strip())
     scheme = (parsed.scheme or "https").lower()
     netloc = parsed.netloc.lower()
     if netloc.startswith("www."):
         netloc = netloc[4:]
     normalized_path = parsed.path.rstrip("/")
-    return urlunparse((scheme, netloc, normalized_path, "", parsed.query, ""))
+    clean_params = sorted(
+        (k, v)
+        for k, v in parse_qsl(parsed.query, keep_blank_values=False)
+        if k.lower() not in _TRACKING_PARAMS
+        and not any(k.lower().startswith(p) for p in _TRACKING_PARAM_PREFIXES)
+    )
+    normalized_query = urlencode(clean_params)
+    return urlunparse((scheme, netloc, normalized_path, "", normalized_query, ""))
 
 
 def _authority_bonus(url: str) -> float:
@@ -168,18 +182,54 @@ class RetrievedSourceRegistry:
     async def register_extract_response(
         self,
         response: TavilyExtractResponse,
+        *,
+        requested_urls: Optional[List[str]] = None,
+        default_scope: Optional[str] = None,
     ) -> List[SourceRecord]:
+        """
+        Attaches Tavily /extract markdown back to existing SourceRecords (including when
+        Tavily follows a redirect to a slightly different URL) and ensures extracted
+        sources retain a non-zero relevance score and scope tag.
+        """
         updated: List[SourceRecord] = []
+        req_norms = [normalize_url(u) for u in (requested_urls or []) if u and u.strip()]
+
         async with self._lock:
             for item in response.results:
                 if not item.url or not item.raw_content:
                     continue
-                rec = self._upsert_unlocked(
-                    url=item.url,
-                    extracted_content=item.raw_content,
-                )
-                if rec is not None:
-                    updated.append(rec)
+                item_norm = normalize_url(item.url)
+                target_rec = self._by_normalized_url.get(item_norm)
+
+                # Handle redirect mismatch: attach extracted content to the requested record
+                if target_rec is None and req_norms:
+                    if len(req_norms) == 1:
+                        target_rec = self._by_normalized_url.get(req_norms[0])
+                    else:
+                        item_host = urlparse(item_norm).netloc
+                        for rn in req_norms:
+                            cand = self._by_normalized_url.get(rn)
+                            if cand is not None and not cand.is_extracted and urlparse(rn).netloc == item_host:
+                                target_rec = cand
+                                break
+
+                if target_rec is not None:
+                    target_rec.extracted_content = item.raw_content
+                    target_rec.is_extracted = True
+                    if default_scope and default_scope not in target_rec.matched_scopes:
+                        target_rec.matched_scopes.append(default_scope)
+                    # Register the redirected URL as an alias pointing to the same SourceRecord
+                    self._by_normalized_url[item_norm] = target_rec
+                    updated.append(target_rec)
+                else:
+                    rec = self._upsert_unlocked(
+                        url=item.url,
+                        extracted_content=item.raw_content,
+                        score=0.5,
+                        scope=default_scope,
+                    )
+                    if rec is not None:
+                        updated.append(rec)
         return updated
 
     def verify_url(self, url: str) -> Optional[SourceRecord]:
@@ -192,8 +242,15 @@ class RetrievedSourceRegistry:
         return self._by_source_id.get(source_id)
 
     def list_sources(self) -> List[SourceRecord]:
-        """Returns all sources sorted by relevance score (descending)."""
-        return sorted(self._by_normalized_url.values(), key=lambda s: s.score, reverse=True)
+        """
+        Returns unique SourceRecords sorted with extracted & authoritative sources prioritized.
+        """
+        unique_records = list(self._by_source_id.values())
+        return sorted(
+            unique_records,
+            key=lambda s: (s.is_extracted, s.score + _authority_bonus(s.url)),
+            reverse=True,
+        )
 
     def select_top_urls_for_extraction(self, limit: int = 4) -> List[str]:
         """
@@ -202,7 +259,7 @@ class RetrievedSourceRegistry:
         """
         candidates = [
             rec
-            for rec in self._by_normalized_url.values()
+            for rec in self._by_source_id.values()
             if not rec.is_extracted and rec.url.startswith(("http://", "https://"))
         ]
         ranked = sorted(
@@ -248,4 +305,4 @@ class RetrievedSourceRegistry:
         return "\n".join(lines)
 
     def __len__(self) -> int:
-        return len(self._by_normalized_url)
+        return len(self._by_source_id)

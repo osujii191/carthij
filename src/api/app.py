@@ -13,7 +13,7 @@ if _ROOT_ENV.exists():
 else:
     load_dotenv()
 from typing import AsyncGenerator, List, Optional
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, status
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import httpx
@@ -64,6 +64,10 @@ async def execute_report_job(payload: JobPayload) -> None:
     report_id = payload.report_id
     orchestrator = FundingPipelineOrchestrator()
 
+    existing = await report_repository.get(report_id)
+    initial_history = list(existing.stage_history) if existing else []
+    created_at = existing.created_at if existing else None
+
     async def _on_progress(progress: StageProgress) -> None:
         next_status = "completed" if progress.stage == "completed" else "in_progress"
         await report_repository.append_stage_progress(
@@ -78,16 +82,29 @@ async def execute_report_job(payload: JobPayload) -> None:
             report_id=report_id,
             owner_uid=payload.owner_uid,
             on_progress=_on_progress,
+            initial_stage_history=initial_history,
+            created_at=created_at,
         )
         await report_repository.save(report)
-
-        if payload.callback_url:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                await client.post(payload.callback_url, json=report.model_dump())
-                logger.info("Posted completed report %s to callback %s", report_id, payload.callback_url)
     except Exception as exc:
         logger.exception("Error executing pipeline for report %s: %s", report_id, exc)
         await report_repository.mark_failed(report_id, str(exc))
+        return
+
+    # Deliver optional callback webhook in an isolated try/except so delivery errors
+    # never overwrite an already-completed report with status='failed'.
+    if payload.callback_url:
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                await client.post(payload.callback_url, json=report.model_dump())
+                logger.info("Posted completed report %s to callback %s", report_id, payload.callback_url)
+        except Exception as cb_exc:
+            logger.exception(
+                "Callback webhook delivery failed for completed report %s (%s): %s",
+                report_id,
+                payload.callback_url,
+                cb_exc,
+            )
 
 
 job_dispatcher: JobDispatcher = get_job_dispatcher(execute_report_job)
@@ -204,7 +221,9 @@ async def get_report(report_id: str):
 )
 async def stream_report_progress(
     report_id: str,
+    request: Request,
     poll_interval_seconds: float = 1.0,
+    max_duration_seconds: float = 300.0,
 ):
     """
     Multi-instance-safe SSE endpoint backed directly by ReportRepository (Firestore or SQLite).
@@ -215,10 +234,14 @@ async def stream_report_progress(
         raise HTTPException(status_code=404, detail=f"Report '{report_id}' not found.")
 
     interval = max(0.05, min(poll_interval_seconds, 5.0))
+    deadline = time.monotonic() + max(5.0, min(max_duration_seconds, 600.0))
 
     async def _event_generator() -> AsyncGenerator[str, None]:
         sent_count = 0
         while True:
+            if await request.is_disconnected():
+                break
+
             current = await report_repository.get(report_id)
             if current is None:
                 yield f"event: error\ndata: {json.dumps({'detail': 'Report not found'})}\n\n"
@@ -234,6 +257,13 @@ async def stream_report_progress(
                 yield (
                     f"event: {terminal_event}\n"
                     f"data: {json.dumps({'report_id': current.report_id, 'status': current.status})}\n\n"
+                )
+                break
+
+            if time.monotonic() >= deadline:
+                yield (
+                    f"event: timeout\n"
+                    f"data: {json.dumps({'report_id': report_id, 'detail': 'Stream timeout reached; poll GET /api/v1/reports/{id}'})}\n\n"
                 )
                 break
 

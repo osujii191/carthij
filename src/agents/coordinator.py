@@ -40,6 +40,8 @@ class CoordinatorAgent:
         report_id: Optional[str] = None,
         owner_uid: Optional[str] = None,
         on_progress: Optional[ProgressCallback] = None,
+        initial_stage_history=None,
+        created_at: Optional[float] = None,
     ) -> FundingReport:
         """Runs the canonical 3-stage funding readiness pipeline and returns FundingReport."""
         return await self.orchestrator.run(
@@ -47,6 +49,8 @@ class CoordinatorAgent:
             report_id=report_id,
             owner_uid=owner_uid,
             on_progress=on_progress,
+            initial_stage_history=initial_stage_history,
+            created_at=created_at,
         )
 
     async def run(self, form: FormSubmissionRequest) -> WorkflowExecutionResponse:

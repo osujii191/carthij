@@ -35,3 +35,10 @@ ui/tsconfig.tsbuildinfo
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Firebase Emulator & CLI logs
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+firestore-debug.log
+ui-debug.log

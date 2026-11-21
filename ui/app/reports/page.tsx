@@ -176,7 +176,7 @@ export default function ReportsDashboard() {
               const running = isRunning(report.status);
               const completed = report.status === "completed";
               const fundingType = String(report.intake_data?.target_funding_instrument || "Funding Intake");
-              const fundingAmount = String(report.intake_data?.target_amount_usd || "—");
+              const fundingAmount = String(report.intake_data?.target_amount_usd || "—").replace(/^\$/, "");
               const formattedDate = new Date(report.created_at * 1000).toLocaleString(undefined, {
                 month: "short",
                 day: "numeric",

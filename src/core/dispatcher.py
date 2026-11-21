@@ -60,9 +60,18 @@ class CloudTasksDispatcher:
         worker_secret: Optional[str] = None,
     ) -> None:
         self.queue_path = queue_path
-        self.worker_url = f"{worker_base_url.rstrip('/')}/internal/worker/execute"
+        self.worker_base_url = worker_base_url.rstrip("/")
+        self.worker_url = f"{self.worker_base_url}/internal/worker/execute"
         self.service_account_email = service_account_email
         self.worker_secret = worker_secret
+        self._client = None
+
+    def _get_client(self):
+        if self._client is None:
+            from google.cloud import tasks_v2  # type: ignore[import-untyped]
+
+            self._client = tasks_v2.CloudTasksClient()
+        return self._client
 
     async def dispatch(self, payload: JobPayload) -> None:
         from google.cloud import tasks_v2  # type: ignore[import-untyped]
@@ -80,12 +89,13 @@ class CloudTasksDispatcher:
         if self.service_account_email:
             http_request["oidc_token"] = {
                 "service_account_email": self.service_account_email,
+                "audience": self.worker_base_url,
             }
 
         task = {"http_request": http_request}
 
         def _enqueue() -> None:
-            client = tasks_v2.CloudTasksClient()
+            client = self._get_client()
             client.create_task(parent=self.queue_path, task=task)
 
         await asyncio.to_thread(_enqueue)

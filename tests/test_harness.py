@@ -699,6 +699,113 @@ class TestAgentHarness(unittest.TestCase):
             if os.path.exists(temp_db):
                 os.remove(temp_db)
 
+    def test_grounding_blocks_hallucinated_url_with_guessed_source_id_and_prefers_gov(self):
+        import asyncio
+        from src.models.report import FundingOpportunity
+        from src.pipeline.grounding import verify_and_ground_opportunities
+        from src.pipeline.registry import RetrievedSourceRegistry, normalize_url
+
+        # Tracking params stripped and query params sorted
+        self.assertEqual(
+            normalize_url("https://www.esd.ny.gov/grants/?b=2&utm_source=google&a=1#top"),
+            normalize_url("https://esd.ny.gov/grants?a=1&b=2&fbclid=xyz"),
+        )
+
+        async def _run():
+            reg = RetrievedSourceRegistry()
+            await reg.register_source(
+                url="https://blog.example.com/ny-grants",
+                title="Blog about NYSTAR",
+                snippet="NYSTAR matching grant",
+                score=0.90,
+                scope="state",
+            )
+            await reg.register_source(
+                url="https://esd.ny.gov/nystar-matching",
+                title="Official NYSTAR Portal",
+                snippet="Official ESD NYSTAR program",
+                score=0.80,
+                scope="state",
+            )
+
+            candidates = [
+                # Hallucinated URL attempting to hijack SRC-1 via guessed source_id -> MUST drop
+                FundingOpportunity(
+                    name="Hallucinated Grant",
+                    provider="Fake Agency",
+                    scope="federal",
+                    instrument="Grant",
+                    eligibility_fit="high",
+                    why_it_fits="Fake",
+                    source_url="https://fake-agency.gov/bogus",
+                    source_id="SRC-1",
+                ),
+                # Same program from blog vs official .gov -> dedup should keep .gov
+                FundingOpportunity(
+                    name="NYSTAR Matching Grant",
+                    provider="Empire State Development",
+                    scope="state",
+                    instrument="Grant",
+                    eligibility_fit="high",
+                    why_it_fits="Blog version",
+                    source_url="https://blog.example.com/ny-grants",
+                    source_id="SRC-1",
+                ),
+                FundingOpportunity(
+                    name="NYSTAR Matching Grant",
+                    provider="Empire State Development",
+                    scope="state",
+                    instrument="Grant",
+                    eligibility_fit="high",
+                    why_it_fits="Official version",
+                    source_url="https://esd.ny.gov/nystar-matching",
+                    source_id="SRC-2",
+                ),
+            ]
+
+            res = verify_and_ground_opportunities(candidates, reg)
+            self.assertEqual(res.dropped_count, 1)
+            self.assertEqual(res.dropped_opportunities[0].name, "Hallucinated Grant")
+            self.assertEqual(res.verified_count, 1)
+            self.assertEqual(res.verified_opportunities[0].source_url, "https://esd.ny.gov/nystar-matching")
+
+        asyncio.run(_run())
+
+    def test_registry_redirect_extract_enriches_original_record(self):
+        import asyncio
+        from src.core.tavily import TavilyExtractResponse, TavilyExtractResult
+        from src.pipeline.registry import RetrievedSourceRegistry
+
+        async def _run():
+            reg = RetrievedSourceRegistry()
+            await reg.register_source(
+                url="https://esd.ny.gov/grants",
+                title="ESD Grants",
+                snippet="Short snippet",
+                score=0.85,
+                scope="state",
+            )
+            extract_res = TavilyExtractResponse(
+                results=[
+                    TavilyExtractResult(
+                        url="https://esd.ny.gov/grants/overview",
+                        raw_content="Full redirected page markdown content.",
+                    )
+                ]
+            )
+            updated = await reg.register_extract_response(
+                extract_res,
+                requested_urls=["https://esd.ny.gov/grants"],
+            )
+            self.assertEqual(len(reg), 1)
+            self.assertEqual(len(updated), 1)
+            self.assertEqual(updated[0].source_id, "SRC-1")
+            self.assertTrue(updated[0].is_extracted)
+            # Both original and redirected URLs verify to SRC-1
+            self.assertEqual(reg.verify_url("https://esd.ny.gov/grants/overview").source_id, "SRC-1")
+
+        asyncio.run(_run())
+
     def test_report_storage_lifecycle(self):
         import tempfile
         import os

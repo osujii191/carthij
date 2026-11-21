@@ -109,14 +109,18 @@ class FundingPipelineOrchestrator:
         report_id: Optional[str] = None,
         owner_uid: Optional[str] = None,
         on_progress: Optional[ProgressCallback] = None,
+        initial_stage_history: Optional[List[StageProgress]] = None,
+        created_at: Optional[float] = None,
     ) -> FundingReport:
         started_at = time.time()
+        effective_created_at = created_at if created_at is not None else started_at
         run_id = report_id or str(uuid.uuid4())
         org_name = str(form.data.get("organization_name", "Unknown Organization"))
         org_type = str(form.data.get("organization_type", "Startup"))
         target_state = str(form.data.get("target_state", "NY"))
 
-        stage_history: List[StageProgress] = []
+        # Preserve any pre-existing stage events (e.g. 'queued') so stage_history is strictly append-only
+        stage_history: List[StageProgress] = list(initial_stage_history or [])
         registry = RetrievedSourceRegistry()
 
         # --- Stage 1: Query Understanding, Parallel Search & Selective Extract ---
@@ -130,11 +134,12 @@ class FundingPipelineOrchestrator:
             f"Executing {len(query_plan.queries)} parallel Tavily web searches...",
             on_progress,
         )
-        if self.enable_extract:
+
+        async def _on_extract_start(url_count: int) -> None:
             await self._emit(
                 stage_history,
                 "extracting",
-                f"Extracting full program details from top {self.max_extract_urls} authoritative URLs...",
+                f"Extracting full program details from top {url_count} authoritative URLs...",
                 on_progress,
             )
 
@@ -143,6 +148,7 @@ class FundingPipelineOrchestrator:
             enable_extract=self.enable_extract,
             max_extract_urls=self.max_extract_urls,
             registry=registry,
+            on_extract_start=_on_extract_start if self.enable_extract else None,
         )
         research_context = query_planner.format_search_results_for_context(
             query_plan,
@@ -210,6 +216,18 @@ class FundingPipelineOrchestrator:
                     }
                 )
 
+        if not findings:
+            raise RuntimeError("All specialist agents failed; unable to produce funding readiness report.")
+
+        # Deduplicate overlapping readiness gaps across specialists
+        deduped_gaps: List[ReadinessGap] = []
+        seen_gap_keys = set()
+        for gap in all_gaps:
+            key = (gap.category, "".join(ch for ch in gap.description[:60].lower() if ch.isalnum()))
+            if key not in seen_gap_keys:
+                seen_gap_keys.add(key)
+                deduped_gaps.append(gap)
+
         # --- Stage 3: Programmatic Citation Verification & Executive Synthesis ---
         await self._emit(
             stage_history,
@@ -220,15 +238,25 @@ class FundingPipelineOrchestrator:
         grounding = verify_and_ground_opportunities(candidate_opportunities, registry)
 
         synthesizer = ReportSynthesizer(model=self.model)
-        synthesis = await synthesizer.synthesize(
-            intake_data=form.data,
-            understanding=query_plan.understanding,
-            verified_opportunities=grounding.verified_opportunities,
-            readiness_gaps=all_gaps,
-            specialist_findings=findings,
-        )
+        try:
+            synthesis = await synthesizer.synthesize(
+                intake_data=form.data,
+                understanding=query_plan.understanding,
+                verified_opportunities=grounding.verified_opportunities,
+                readiness_gaps=deduped_gaps,
+                specialist_findings=findings,
+            )
+            executive_summary = synthesis.executive_summary
+            readiness_score = synthesis.readiness_score
+            action_plan = synthesis.prioritized_action_plan or fallback_actions
+        except Exception as exc:
+            logger.exception("ReportSynthesizer failed; falling back to deterministic summary: %s", exc)
+            executive_summary = "\n\n".join(
+                f"{f.specialist_name.replace('_', ' ').title()}: {f.summary}" for f in findings
+            )
+            readiness_score = None
+            action_plan = fallback_actions
 
-        action_plan = synthesis.prioritized_action_plan or fallback_actions
         now = time.time()
         await self._emit(stage_history, "completed", "Funding readiness report completed.", on_progress)
 
@@ -241,10 +269,10 @@ class FundingPipelineOrchestrator:
             org_type=org_type,
             target_state=target_state,
             intake_data=dict(form.data),
-            executive_summary=synthesis.executive_summary,
-            readiness_score=synthesis.readiness_score,
+            executive_summary=executive_summary,
+            readiness_score=readiness_score,
             opportunities=grounding.verified_opportunities,
-            readiness_gaps=all_gaps,
+            readiness_gaps=deduped_gaps,
             action_plan=action_plan,
             specialist_outputs=specialist_outputs,
             sources=registry.to_persisted_sources(max_excerpt_chars=2000),
@@ -265,6 +293,6 @@ class FundingPipelineOrchestrator:
                 "dropped_opportunities": [d.model_dump() for d in grounding.dropped_opportunities],
                 "latency_ms": int((now - started_at) * 1000),
             },
-            created_at=started_at,
+            created_at=effective_created_at,
             updated_at=now,
         )

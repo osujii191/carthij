@@ -89,7 +89,7 @@ class ReportStorage:
             created_at=now,
             updated_at=now,
         )
-        with self._get_connection() as conn:
+        with closing(self._get_connection()) as conn:
             conn.execute(
                 """
                 INSERT INTO reports (
@@ -134,7 +134,7 @@ class ReportStorage:
         )
         updated_metadata = metadata if metadata is not None else record.metadata
 
-        with self._get_connection() as conn:
+        with closing(self._get_connection()) as conn:
             conn.execute(
                 """
                 UPDATE reports
@@ -155,7 +155,7 @@ class ReportStorage:
         return self.get_report(report_id)
 
     def get_report(self, report_id: str) -> Optional[ReportRecord]:
-        with self._get_connection() as conn:
+        with closing(self._get_connection()) as conn:
             cursor = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,))
             row = cursor.fetchone()
             if not row:
@@ -176,7 +176,7 @@ class ReportStorage:
             )
 
     def list_reports(self) -> List[ReportRecord]:
-        with self._get_connection() as conn:
+        with closing(self._get_connection()) as conn:
             cursor = conn.execute("SELECT * FROM reports ORDER BY created_at DESC")
             rows = cursor.fetchall()
             return [

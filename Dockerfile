@@ -11,10 +11,10 @@ WORKDIR /app
 # Install uv for fast, deterministic dependency installation
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-COPY pyproject.toml ./
-RUN uv pip install --system --no-cache ".[gcp]"
-
+# Copy project metadata, README (referenced by hatchling), and source before installing
+COPY pyproject.toml README.md ./
 COPY src ./src
+RUN uv pip install --system --no-cache ".[gcp]"
 
 # Run as non-root user for Cloud Run security best practices
 RUN useradd --create-home --shell /bin/bash appuser \

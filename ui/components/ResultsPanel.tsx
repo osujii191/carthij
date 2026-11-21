@@ -31,6 +31,11 @@ const TIMEFRAME_LABELS: Record<string, string> = {
   medium_term_90d: "Next 90 Days",
 };
 
+const safeHref = (url: string): string => {
+  const trimmed = (url || "").trim();
+  return trimmed.startsWith("https://") || trimmed.startsWith("http://") ? trimmed : "#";
+};
+
 export default function ResultsPanel({ report }: ResultsPanelProps) {
   const [scopeFilter, setScopeFilter] = useState<string>("all");
 
@@ -180,7 +185,7 @@ export default function ResultsPanel({ report }: ResultsPanelProps) {
                     {opp.citation_verified ? `Verified ${opp.source_id}` : opp.source_id}
                   </span>
                   <a
-                    href={opp.source_url}
+                    href={safeHref(opp.source_url)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1 font-semibold text-blue-600 hover:underline"
@@ -325,7 +330,7 @@ export default function ResultsPanel({ report }: ResultsPanelProps) {
                       </span>
                     )}
                     <a
-                      href={src.url}
+                      href={safeHref(src.url)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-xs font-semibold text-blue-600 hover:underline truncate"

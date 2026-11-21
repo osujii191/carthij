@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
 from urllib.parse import urlparse, urlunparse
 from pydantic import BaseModel, Field
 
@@ -323,6 +323,7 @@ class QueryPlanner:
         enable_extract: bool = True,
         max_extract_urls: int = 4,
         registry: Optional[RetrievedSourceRegistry] = None,
+        on_extract_start: Optional[Callable[[int], Awaitable[None]]] = None,
     ) -> QueryExecutionReport:
         """
         Executes a QueryPlan via parallel Tavily /search, populates a RetrievedSourceRegistry,
@@ -348,13 +349,18 @@ class QueryPlanner:
         if enable_extract and max_extract_urls > 0:
             urls_to_extract = source_registry.select_top_urls_for_extraction(limit=max_extract_urls)
             if urls_to_extract:
+                if on_extract_start is not None:
+                    await on_extract_start(len(urls_to_extract))
                 logger.info("Running selective Tavily /extract on %d top URLs...", len(urls_to_extract))
                 extract_res: TavilyExtractResponse = await self.tavily_client.extract(
                     urls_to_extract,
                     extract_depth="basic",
                     format="markdown",
                 )
-                updated = await source_registry.register_extract_response(extract_res)
+                updated = await source_registry.register_extract_response(
+                    extract_res,
+                    requested_urls=urls_to_extract,
+                )
                 extracted_count = len(updated)
                 if extract_res.usage:
                     extract_credits = extract_res.usage.credits

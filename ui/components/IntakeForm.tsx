@@ -334,9 +334,9 @@ export default function IntakeForm() {
               className="mt-1 accent-blue-600 rounded"
             />
             <span className="text-sm">
-              <span className="font-semibold text-slate-900 block">Async Background Webhook Dispatch</span>
+              <span className="font-semibold text-slate-900 block">Optional Webhook Callback Notification</span>
               <span className="text-xs text-slate-500 block">
-                Deliver results to an external callback URL instead of waiting synchronously.
+                Also POST the completed canonical report JSON to an external webhook URL when finished.
               </span>
             </span>
           </label>

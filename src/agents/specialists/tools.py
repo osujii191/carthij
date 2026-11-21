@@ -118,7 +118,11 @@ class BoundedTavilyToolSuite:
             if res.usage:
                 suite.credits_used += res.usage.credits
 
-            updated = await suite.registry.register_extract_response(res)
+            updated = await suite.registry.register_extract_response(
+                res,
+                requested_urls=[url],
+                default_scope=suite.default_scope,
+            )
             if not updated:
                 return {
                     "status": "error",

@@ -79,3 +79,20 @@ High-level chronological log of completed architecture and implementation phases
   - Upgraded `/reports/[id]` to subscribe to live Server-Sent Events (`GET /api/v1/reports/{id}/stream`) with a 5-stage real-time progress indicator.
   - Upgraded `ResultsPanel` to display Readiness Score (`0–100`), scope-filterable Verified Funding Opportunities with `[SRC-N]` citations, Readiness Gaps by severity, Prioritized 7d/30d/90d Action Plan, Specialist Summaries, and the Verified Source Registry.
 - **Verification**: Backend unit tests (18/18) and Next.js production build (`npm run build`) verified cleanly.
+
+---
+
+## 2026-11-21 — Production Hardening Pass (Code Review P1/P2/P3 Fixes)
+
+Addressed all P1 and high-value P2/P3 findings from [phase_1_2_code_review.md](./phase_1_2_code_review.md):
+
+- **P1 Fixes**:
+  - `Dockerfile`: Copy `pyproject.toml`, `README.md`, and `src/` before `uv pip install --system --no-cache ".[gcp]"` so `hatchling` builds cleanly on Cloud Run.
+  - `ui/app/reports/[id]/page.tsx`: Distinguished server-sent `event: error` frames from transient `EventSource` disconnects and added a seamless polling fallback if SSE closes early.
+  - `src/api/app.py` & `src/pipeline/orchestrator.py`: Preserved initial `"queued"` stage in `stage_history` and original `created_at` on final `save(report)` so SSE never skips the final `"completed"` stage event.
+  - `src/pipeline/grounding.py`: Restricted `source_id` fallback to blank URLs or matching hosts so hallucinated URLs cannot hijack `SRC-1`; added cross-URL same-program deduplication preferring `.gov` / authoritative sources.
+  - `src/core/agent.py`: Defaulted `reset_history: bool = True` in `BaseAgent.run()` and guarded empty `response.candidates`.
+  - `src/pipeline/registry.py`: Mapped redirected Tavily `/extract` URLs back to the original requested `SRC-N` record, prioritized extracted/authoritative sources in `list_sources()`, and stripped tracking params (`utm_*`, `fbclid`, `gclid`) in `normalize_url()`.
+- **P2/P3 Fixes**:
+  - Isolated `callback_url` webhook delivery in its own `try/except`, added SSE timeout (`max_duration_seconds`) + `request.is_disconnected()`, enabled SQLite WAL mode, switched Firestore `.where()` to `FieldFilter`, cached `CloudTasksClient` with OIDC `audience`, added Firebase Emulator logs to `.gitignore`, added `http(s)://` link guard in `ResultsPanel.tsx`, normalized `STATE_GUIDANCE` aliases, deduplicated `readiness_gaps`, added synthesizer fallback + fail-fast when all specialists fail, emitted `"extracting"` after `/search` completes, and closed legacy SQLite connections cleanly.
+- **Verification**: All 20 backend unit tests pass with zero SQLite `ResourceWarning`s, and `ui/` `npm run build` succeeds cleanly.

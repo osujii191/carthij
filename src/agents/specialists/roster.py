@@ -45,6 +45,25 @@ def _is_nonprofit(org_type: str) -> bool:
     return "nonprofit" in normalized or "501c3" in normalized or "ngo" in normalized
 
 
+STATE_ALIASES = {
+    "NY": "NY",
+    "NEW YORK": "NY",
+    "NYC": "NY",
+    "NJ": "NJ",
+    "NEW JERSEY": "NJ",
+    "SF": "SF",
+    "SAN FRANCISCO": "SF",
+    "CA": "SF",
+    "CALIFORNIA": "SF",
+    "BAY AREA": "SF",
+}
+
+
+def _normalize_state(target_state: str) -> str:
+    raw = (target_state or "NY").strip().upper()
+    return STATE_ALIASES.get(raw, raw)
+
+
 def build_specialists(
     *,
     org_type: str,
@@ -57,7 +76,7 @@ def build_specialists(
     Constructs the deterministic, opinionated roster of 4 specialist agents routed by
     `org_type` (Startup vs. Non-Profit) and `target_state` (NY / NJ / SF).
     """
-    state_code = (target_state or "NY").upper()
+    state_code = _normalize_state(target_state)
     state_hint = STATE_GUIDANCE.get(
         state_code,
         f"Focus on {state_code} state economic development agencies, tax credits, and municipal grant programs.",

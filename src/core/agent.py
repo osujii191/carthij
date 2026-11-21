@@ -75,14 +75,19 @@ class BaseAgent:
 
         return types.GenerateContentConfig(**config_kwargs)
 
-    async def run(self, prompt: str) -> str:
+    async def run(self, prompt: str, *, reset_history: bool = True) -> str:
         """
         Executes an agent turn with native async function calling loop.
+        Resets `self.history` by default on each call so reused agent instances never leak
+        prior request context across runs.
         When both `tools` and `response_schema` are configured, runs two-phase execution:
         1. Tool-calling turns with `tools` enabled and `response_schema` disabled (ensuring
            consistent behavior across Gemini Developer API and Vertex AI).
         2. Final structured turn with `response_schema` enabled and `tools` disabled.
         """
+        if reset_history:
+            self.history = []
+
         # Append user message to history
         self.history.append(
             types.Content(
@@ -105,12 +110,13 @@ class BaseAgent:
                 config=config,
             )
 
-            # Record model candidate in history
-            candidate = response.candidates[0]
-            self.history.append(candidate.content)
+            # Record model candidate in history safely
+            candidates = getattr(response, "candidates", None) or []
+            if candidates and getattr(candidates[0], "content", None) is not None:
+                self.history.append(candidates[0].content)
 
             # Check if model requested function calls
-            function_calls = response.function_calls
+            function_calls = getattr(response, "function_calls", None)
             if not function_calls:
                 if not two_phase:
                     return response.text or ""
@@ -173,7 +179,9 @@ class BaseAgent:
                 contents=self.history,
                 config=structured_config,
             )
-            self.history.append(final_response.candidates[0].content)
+            final_candidates = getattr(final_response, "candidates", None) or []
+            if final_candidates and getattr(final_candidates[0], "content", None) is not None:
+                self.history.append(final_candidates[0].content)
             return final_response.text or ""
 
         return (response.text if response else None) or "Max iterations reached without final response."

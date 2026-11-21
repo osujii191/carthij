@@ -64,6 +64,7 @@ class SQLiteReportRepository:
 
     def _init_db(self) -> None:
         with closing(self._connect()) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS funding_reports (
@@ -275,10 +276,11 @@ class FirestoreReportRepository:
         limit: int = 50,
     ) -> List[FundingReport]:
         from google.cloud import firestore  # type: ignore[import-untyped]
+        from google.cloud.firestore_v1.base_query import FieldFilter  # type: ignore[import-untyped]
 
         query = self._get_client().collection(self.collection_name)
         if owner_uid is not None:
-            query = query.where("owner_uid", "==", owner_uid)
+            query = query.where(filter=FieldFilter("owner_uid", "==", owner_uid))
         query = query.order_by("created_at", direction=firestore.Query.DESCENDING).limit(limit)
 
         results: List[FundingReport] = []
