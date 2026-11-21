@@ -66,7 +66,8 @@ def verify_and_ground_opportunities(
         rec = registry.verify_url(raw_url) if raw_url else None
 
         if rec is None and opp.source_id:
-            candidate = registry.get_by_id(opp.source_id.strip())
+            clean_id = opp.source_id.strip().strip("[]")
+            candidate = registry.get_by_id(clean_id)
             if candidate is not None:
                 # Only accept source_id fallback if source_url was omitted or matches the same host
                 if not raw_url or _host(raw_url) == _host(candidate.url):

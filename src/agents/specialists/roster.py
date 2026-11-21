@@ -218,6 +218,10 @@ def build_specialists(
                     "the retrieved program sources. Surface concrete readiness gaps (e.g. SAM.gov/UEI registration, "
                     "state nexus/registration, matching funds, 501(c)(3) determination, C-Corp conversion for VC, "
                     "audit/financial readiness) and prioritized remediation actions. "
+                    "Explicitly audit for: (1) contradictory entity/instrument requests (e.g. 501(c)(3) requesting SAFE/equity or SBIR Phase I, "
+                    "for-profit LLC requesting 501(c)(3)-only charity grants without a fiscal sponsor, >50% foreign ownership on SBIR, or zero in-state nexus), "
+                    "(2) award cap & scale mismatches (e.g. requesting $25M-$150M from a $150k-$305k seed/SBIR Phase I grant, $2,500 micro asks for VC Series A, or $0/TBD budgets), and "
+                    "(3) expired or fabricated user-requested programs. "
                     "Set `specialist_name` to 'eligibility_compliance'."
                     + GROUNDING_RULES
                 ),

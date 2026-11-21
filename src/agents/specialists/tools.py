@@ -118,6 +118,23 @@ class BoundedTavilyToolSuite:
             if res.usage:
                 suite.credits_used += res.usage.credits
 
+            # Only allow extracting URLs that were either already discovered in the search registry
+            # or returned substantive content without HTTP/extraction errors (prevents user-injected
+            # fake URLs in prompts from entering the verified source registry).
+            was_in_registry = suite.registry.verify_url(url) is not None
+            valid_results = [
+                r
+                for r in res.results
+                if r.raw_content and len(r.raw_content.strip()) >= 80
+            ]
+            if not valid_results or (not was_in_registry and res.failed_results):
+                return {
+                    "status": "error",
+                    "error": res.error or "URL could not be verified or returned insufficient content.",
+                    "calls_remaining": max(0, suite.max_calls - suite.calls_used),
+                }
+
+            res.results = valid_results
             updated = await suite.registry.register_extract_response(
                 res,
                 requested_urls=[url],
