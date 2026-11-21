@@ -58,7 +58,40 @@ class PDFSuiteAggregate(BaseModel):
 
 
 def _make_pdf_b64(body_text: str) -> str:
-    raw = f"%PDF-1.4\n1 0 obj\n<< /Title ({body_text}) >>\nendobj\n%%EOF".encode("utf-8")
+    """
+    Constructs a structurally valid, single-page PDF 1.4 byte stream with a real
+    Catalog, Pages tree, Page object, Content stream, and xref table so live Gemini
+    multimodal PDF ingestion can parse it directly.
+    """
+    safe_text = body_text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    stream_data = f"BT /F1 12 Tf 36 720 Td ({safe_text}) Tj ET".encode("latin-1", errors="ignore")
+    objs = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+        f"4 0 obj\n<< /Length {len(stream_data)} >>\nstream\n".encode("ascii")
+        + stream_data
+        + b"\nendstream\nendobj\n",
+        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    ]
+    header = b"%PDF-1.4\n"
+    offsets = []
+    body = b""
+    cur = len(header)
+    for o in objs:
+        offsets.append(cur)
+        body += o
+        cur += len(o)
+    xref_pos = cur
+    xref = f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode("ascii")
+    for off in offsets:
+        xref += f"{off:010d} 00000 n \n".encode("ascii")
+    trailer = (
+        f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode(
+            "ascii"
+        )
+    )
+    raw = header + body + xref + trailer
     return "data:application/pdf;base64," + base64.b64encode(raw).decode("ascii")
 
 

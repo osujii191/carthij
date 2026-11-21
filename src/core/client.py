@@ -11,7 +11,7 @@ if _ROOT_ENV.exists():
 else:
     load_dotenv()
 
-DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-4-hydrogen")
 
 
 def get_genai_client(

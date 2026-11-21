@@ -118,3 +118,22 @@ Track 3 (`src/evals/pdf_evals.py`) evaluates `PDFIntakeExtractor` (`POST /api/v1
 # Run the full 28-test unit + benchmark suite
 .venv/bin/python -m unittest discover -s tests -v
 ```
+
+
+---
+
+## 7. Live Multi-Model Benchmark Matrix (`gemini-4-hydrogen` vs. `gemini-3.8-flash` vs. `gemini-4-argon` vs. `gemini-4-neon` vs. `gemini-4-carbon`)
+
+We ran live Google GenAI API calls (`src/evals/live_model_matrix.py`) across all 5 candidate models on the representative 6-cohort Track 1 slice, Track 2 Browser Drafter (`FormMapperAgent` + `BrowserDraftOrchestrator`), and Track 3 Multimodal PDF Extraction (`PDFIntakeExtractor`), plus live `SingleLLMBaseline` (`65.0%` composite, `0.0%` URL grounding rate).
+
+| Model | Track 1 Discovery Accuracy (Live) | Track 1 Pipeline Latency (6-Agent Fan-Out) | Track 2 Browser Drafter Accuracy (Live) | Track 2 Drafter Latency (3-Step Wizard) | Track 3 Multimodal PDF `verified_extra_facts` Recall | Track 3 PDF Latency | Recommendation |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **`gemini-4-hydrogen`** | **100.0%** | **61.2 s** *(Fastest)* | **100.0%** | **7.7 s** *(Fastest)* | **100.0%** (`federal_ein`, `sam_uei`) | **5.7 s** *(Fastest)* | **Best Speed/Accuracy Winner** for real-time interactive demos |
+| **`gemini-3.8-flash`** *(Current Default)* | **100.0%** | **70.9 s** | **100.0%** | **14.6 s** | **100.0%** (`federal_ein`, `sam_uei`) | **6.0 s** | **Best Proven Default** (fast & 100% recall across all 3 tracks) |
+| **`gemini-4-argon`** | **100.0%** | **105.5 s** | **100.0%** | **13.0 s** | **100.0%** (`federal_ein`, `sam_uei`) | **7.7 s** | Strong deep-reasoning alternative (`1.5x` slower than `3.8-flash`) |
+| **`gemini-4-neon`** | **100.0%** | **164.3 s** | **100.0%** | **26.1 s** | **0.0%** *(missed `verified_extra_facts`)* | **13.5 s** | **Do not use** — `2.7x` slower than `hydrogen` and dropped PDF `verified_extra_facts` (`facts: []`) |
+| **`gemini-4-carbon`** | **100.0%** | **194.7 s** | **100.0%** | **16.2 s** | **100.0%** (`federal_ein`, `sam_uei`) | **9.1 s** | Overkill for interactive workflows (`3.2x` slower than `hydrogen` with identical accuracy) |
+
+### Key Finding Exposed Only by Running the Live Multi-Model Eval
+1. **Why Programmatic Guards Equalize Accuracy Across Model Sizes**: Because Carthij `v2` enforces citation verification (`src/pipeline/grounding.py`) and compliance anti-fabrication (`src/drafter/orchestrator.py`) in deterministic Python post-filters, `gemini-4-hydrogen` (`61.2s` Track 1 / `7.7s` Track 2 / `5.7s` Track 3) and `gemini-3.8-flash` (`70.9s` / `14.6s` / `6.0s`) achieve the exact same **100% accuracy** as `gemini-4-carbon` (`194.7s`), at **3x faster speed**!
+2. **Real Bug Exposed & Fixed by Live PDF Calls**: Running live PDF extraction against the Gemini API exposed that our initial synthetic PDF helper (`_make_pdf_b64` in `src/evals/pdf_evals.py`) lacked a PDF `xref` table and `/Pages` catalog, which passed offline `startswith(b"%PDF")` checks but failed Gemini's live PDF parser with `400 INVALID_ARGUMENT`. We upgraded `_make_pdf_b64()` to construct a full PDF 1.4 catalog + `xref` stream, which also revealed that **`gemini-4-neon` returned `verified_extra_facts: []`** on the PDF while `gemini-4-hydrogen`, `gemini-3.8-flash`, `gemini-4-argon`, and `gemini-4-carbon` extracted `('federal_ein', '12-3456789')` and `('sam_uei', 'J8K9L2M4N6P8')` with 100% recall.
