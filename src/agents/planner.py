@@ -4,6 +4,7 @@ from urllib.parse import urlparse, urlunparse
 from pydantic import BaseModel, Field
 
 from src.core.agent import BaseAgent
+from src.core.client import DEFAULT_GEMINI_MODEL
 from src.core.tavily import (
     SearchTopic,
     TavilyClient,
@@ -123,7 +124,7 @@ class QueryPlanner:
     high-precision Tavily queries, fires them in parallel, and deduplicates the results.
     """
 
-    def __init__(self, model: str = "gemini-2.5-flash", tavily_client: Optional[TavilyClient] = None):
+    def __init__(self, model: str = DEFAULT_GEMINI_MODEL, tavily_client: Optional[TavilyClient] = None):
         self.model = model
         self.tavily_client = tavily_client or TavilyClient()
         self.agent = BaseAgent(

@@ -5,7 +5,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
-from src.core.client import get_genai_client
+from src.core.client import DEFAULT_GEMINI_MODEL, get_genai_client
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class BaseAgent:
         name: str,
         role: str,
         system_instruction: str,
-        model: str = "gemini-2.5-flash",
+        model: str = DEFAULT_GEMINI_MODEL,
         tools: Optional[List[Callable[..., Any]]] = None,
         response_schema: Optional[Type[BaseModel]] = None,
         client: Optional[genai.Client] = None,

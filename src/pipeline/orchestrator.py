@@ -9,6 +9,7 @@ from src.agents.planner import QueryPlanner
 from src.agents.specialists import SpecialistSpec, build_specialists
 from src.agents.synthesizer import ReportSynthesizer
 from src.api.schemas import FormSubmissionRequest
+from src.core.client import DEFAULT_GEMINI_MODEL
 from src.core.tavily import TavilyClient
 from src.models.report import (
     ActionItem,
@@ -38,7 +39,7 @@ class FundingPipelineOrchestrator:
     def __init__(
         self,
         *,
-        model: str = "gemini-2.5-flash",
+        model: str = DEFAULT_GEMINI_MODEL,
         tavily_client: Optional[TavilyClient] = None,
         enable_extract: bool = True,
         max_extract_urls: int = 4,

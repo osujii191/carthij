@@ -2,8 +2,16 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 import time
 import uuid
+from dotenv import load_dotenv
+
+_ROOT_ENV = Path(__file__).resolve().parents[2] / ".env"
+if _ROOT_ENV.exists():
+    load_dotenv(dotenv_path=_ROOT_ENV)
+else:
+    load_dotenv()
 from typing import AsyncGenerator, List, Optional
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware

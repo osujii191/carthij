@@ -6,6 +6,7 @@ from src.api.schemas import (
     SubagentResult,
     WorkflowExecutionResponse,
 )
+from src.core.client import DEFAULT_GEMINI_MODEL
 from src.core.tavily import TavilyClient
 from src.models.report import FundingReport
 from src.pipeline.orchestrator import FundingPipelineOrchestrator, ProgressCallback
@@ -23,7 +24,7 @@ class CoordinatorAgent:
 
     def __init__(
         self,
-        model: str = "gemini-2.5-flash",
+        model: str = DEFAULT_GEMINI_MODEL,
         tavily_client: Optional[TavilyClient] = None,
     ) -> None:
         self.model = model

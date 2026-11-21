@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from src.agents.planner import QueryUnderstanding
 from src.core.agent import BaseAgent
+from src.core.client import DEFAULT_GEMINI_MODEL
 from src.models.report import ActionItem, FundingOpportunity, ReadinessGap, SpecialistFinding
 
 
@@ -36,7 +37,7 @@ class ReportSynthesizer:
     programmatically verified opportunities and specialist findings (cannot invent new programs).
     """
 
-    def __init__(self, model: str = "gemini-2.5-flash") -> None:
+    def __init__(self, model: str = DEFAULT_GEMINI_MODEL) -> None:
         self.model = model
         self.agent = BaseAgent(
             name="report_synthesizer",

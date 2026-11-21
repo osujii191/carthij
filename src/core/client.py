@@ -1,9 +1,17 @@
 import os
+from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 from google import genai
 
-load_dotenv()
+# Always prefer the project root .env (avoids being shadowed by any nested src/.env)
+_ROOT_ENV = Path(__file__).resolve().parents[2] / ".env"
+if _ROOT_ENV.exists():
+    load_dotenv(dotenv_path=_ROOT_ENV)
+else:
+    load_dotenv()
+
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 
 def get_genai_client(
